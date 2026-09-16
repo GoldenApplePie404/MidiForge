@@ -168,7 +168,7 @@ class MyGame(Plugin):
 - 生命周期：`on_activate(app)` / `on_deactivate()`；可选 `create_panel()` 挂进"插件"Tab
 - 纯逻辑插件（无面板）完全支持
 
-**事件主题：** `midi.message`（ParsedMessage）、`midi.signal`（信号触发）、`midi.sent`（发送回显）、`binding.changed`
+**事件主题：** `midi.message`（ParsedMessage，输入收到并解析）、`midi.signal`（信号触发，含命中信号集合与来源 parsed/key）、`midi.sent`（发送回显）、`key.pressed`（键盘按键归一化名）、`binding.changed`（绑定配置变更）
 
 **线程模型：** rtmidi 回调线程入队 → 程序主线程统一分发（UI 与 EventBus 同一循环，无需锁）
 

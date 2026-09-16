@@ -2,9 +2,9 @@
 
 > **面向 AI 代理的工作者:** 必需子技能：使用 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans 逐任务实现此计划。步骤使用复选框（`- [ ]`）语法来跟踪进度。
 
-**目标:** 制作一个可被 MIDI 设备接入的 Python 桌面程序，用于调试 MIDI 通道（双向收发、通道矩阵、消息日志命名、键盘模拟、绑定信号导出、loopMIDI 虚拟端口对接）。
+**目标:** 制作一个可被 MIDI 设备接入的 Python 桌面程序，用于调试 MIDI 通道（双向收发、通道矩阵、消息日志命名、键盘模拟、绑定信号导出、loopMIDI 虚拟端口对接），并作为可二次开发平台（SDK 框架 + 插件宿主）。
 
-**架构:** 三层分离——`midi/`（设备与协议：端口枚举、收发、解析、键盘、虚拟端口）、`core/`（绑定模型与匹配引擎，不依赖 GUI）、`ui/`（PyQt6 展示与交互）。UI 通过队列 + QTimer 轮询从 rtmidi 回调线程安全地取消息。
+**架构:** 四层分离——`midi/`（设备与协议）、`core/`（绑定/匹配/事件总线/插件协议，不依赖 GUI）、`ui/`（PyQt6 展示与交互）、`api.py`（SDK 门面：AppContext 聚合引擎/总线/配置/匹配器，统一事件分发）。rtmidi 回调线程入队 → 主线程统一分发到 UI 与 EventBus；插件经总线订阅事件、可选挂载面板，异常隔离。
 
 **技术栈:** Python 3.11 + mido / python-rtmidi（MIDI 收发）+ PyQt6（GUI）+ keyboard（可选全局键盘钩子）+ pytest / pytest-qt（测试）。
 
@@ -19,35 +19,50 @@
 ```
 midi-debugger/
 ├── app.py                       # 入口：QApplication + MainWindow
+├── api.py                       # SDK 统一入口：create_app() → AppContext（事件分发/发送/无 GUI 调度）
 ├── requirements.txt             # 运行依赖
 ├── requirements-dev.txt         # 测试依赖
 ├── .gitignore
 ├── midi/
 │   ├── __init__.py
-│   ├── parser.py                # ParsedMessage 解析（raw hex/类型/通道/值/描述/匹配键）
+│   ├── parser.py                # ParsedMessage 解析（raw hex/类型/通道/值/描述/匹配键）+ MIDO_TYPE_MAP
 │   ├── engine.py                # 端口枚举/打开/收发（队列转发）
 │   ├── virtual_port.py          # loopMIDI 检测与引导说明
 │   └── keyboard_input.py        # 按键归一化（Qt 焦点捕获 + 可选全局钩子）
 ├── core/
 │   ├── __init__.py
 │   ├── bindings.py              # BindingSource/Binding/BindingConfig + JSON 导入导出（损坏备份 .bak）
-│   └── matcher.py               # Matcher：ParsedMessage/按键 → 信号集合
+│   ├── matcher.py               # Matcher：ParsedMessage/按键 → 信号集合
+│   ├── events.py                # EventBus：线程安全事件总线
+│   ├── plugin.py                # Plugin 接口（生命周期钩子）
+│   └── plugin_loader.py         # PluginHost：扫描加载插件（失败隔离）
 ├── ui/
 │   ├── __init__.py
-│   ├── main_window.py           # 主窗口布局 + 状态栏
+│   ├── main_window.py           # 主窗口（总线驱动分发 + 插件 Tab）
 │   ├── port_panel.py            # 输入/输出设备选择、刷新、虚拟端口状态
 │   ├── channel_matrix.py        # 16 通道实时矩阵
 │   ├── log_view.py              # 消息日志（过滤/别名/清空）
 │   ├── send_panel.py            # 测试消息发送
 │   ├── bindings_view.py        # 绑定编辑器 + 导入导出
+│   ├── plugin_tabs.py           # 插件 Tab 容器（挂载/错误显示）
 │   └── style_qss.py             # 霓虹主题 QSS
 ├── config/
 │   └── bindings.json            # 默认空绑定配置（首次启动生成）
+├── examples/
+│   ├── example_plugin/          # 示例插件（练习面板）
+│   └── sdk_demo.py              # SDK 无 GUI 用法演示
 └── tests/
     ├── conftest.py
     ├── test_parser.py
     ├── test_bindings.py
-    └── test_matcher.py
+    ├── test_matcher.py
+    ├── test_engine.py
+    ├── test_keyboard_input.py
+    ├── test_virtual_port.py
+    ├── test_events.py
+    ├── test_plugin_loader.py
+    ├── test_api.py
+    └── test_ui_components.py
 ```
 
 ---
@@ -1858,6 +1873,905 @@ git commit -m "chore: 手动验收完成"
 
 ---
 
+## 任务 15：事件总线 `core/events.py`（TDD）
+
+**文件：**
+- 创建：`core/events.py`
+- 测试：`tests/test_events.py`
+
+**设计：** `EventBus` 支持任意字符串主题的订阅/退订/发布；`subscribe` 返回订阅号用于 `unsubscribe`；`publish` 在发布时快照订阅者列表（允许回调中退订）；内部用锁保证线程安全。
+
+- [ ] **步骤 1：编写失败的测试**
+
+`tests/test_events.py`：
+
+```python
+from core.events import EventBus
+
+
+def test_subscribe_publish():
+    bus = EventBus()
+    got = []
+    bus.subscribe("midi.message", got.append)
+    bus.publish("midi.message", 42)
+    assert got == [42]
+
+
+def test_multiple_subscribers():
+    bus = EventBus()
+    a, b = [], []
+    bus.subscribe("t", a.append)
+    bus.subscribe("t", b.append)
+    bus.publish("t", 1)
+    assert a == [1] and b == [1]
+
+
+def test_unsubscribe_stops_delivery():
+    bus = EventBus()
+    got = []
+    sid = bus.subscribe("t", got.append)
+    bus.publish("t", 1)
+    bus.unsubscribe(sid)
+    bus.publish("t", 2)
+    assert got == [1]
+
+
+def test_different_topic_isolated():
+    bus = EventBus()
+    got = []
+    bus.subscribe("a", got.append)
+    bus.publish("b", 1)
+    assert got == []
+
+
+def test_publish_without_subscribers_safe():
+    EventBus().publish("nobody", 1)
+
+
+def test_clear():
+    bus = EventBus()
+    got = []
+    bus.subscribe("t", got.append)
+    bus.clear()
+    bus.publish("t", 1)
+    assert got == []
+```
+
+- [ ] **步骤 2：运行测试验证失败**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_events.py -v`
+预期：FAIL（ModuleNotFoundError: core.events）。
+
+- [ ] **步骤 3：编写最少实现**
+
+`core/events.py`：
+
+```python
+from threading import Lock
+from typing import Any, Callable, Dict, List
+
+
+class EventBus:
+    """线程安全的事件总线：任意字符串主题、订阅/退订/发布。"""
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._subs: Dict[str, List[tuple]] = {}
+        self._next_id = 0
+
+    def subscribe(self, topic: str, cb: Callable[[Any], None]) -> int:
+        with self._lock:
+            self._next_id += 1
+            sid = self._next_id
+            self._subs.setdefault(topic, []).append((sid, cb))
+            return sid
+
+    def unsubscribe(self, sid: int) -> None:
+        with self._lock:
+            for topic, lst in list(self._subs.items()):
+                lst[:] = [(i, cb) for i, cb in lst if i != sid]
+                if not lst:
+                    del self._subs[topic]
+
+    def publish(self, topic: str, payload: Any = None) -> None:
+        with self._lock:
+            subs = list(self._subs.get(topic, []))
+        for _, cb in subs:
+            cb(payload)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._subs.clear()
+
+    def topics(self) -> List[str]:
+        with self._lock:
+            return sorted(self._subs.keys())
+```
+
+- [ ] **步骤 4：运行测试验证通过**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_events.py -v`
+预期：PASS（6 个用例全过）。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add core/events.py tests/test_events.py
+git commit -m "feat: 线程安全事件总线"
+```
+
+---
+
+## 任务 16：插件接口与加载器 `core/plugin.py` + `core/plugin_loader.py`（TDD）
+
+**文件：**
+- 创建：`core/plugin.py`
+- 创建：`core/plugin_loader.py`
+- 测试：`tests/test_plugin_loader.py`
+
+**设计：** `Plugin` 抽象基类：`name` 元数据 + `on_activate(app)` / `on_deactivate()` / `create_panel()`（默认返回 None）。`PluginHost` 扫描 `plugins/` 下每个子目录的 `plugin.py`，用 importlib 导入并实例化，逐个激活；任何异常都被捕获，记录到 `items` 的 `error` 字段并标记 `disabled`，不影响其他插件。
+
+- [ ] **步骤 1：编写失败的测试**
+
+`tests/test_plugin_loader.py`：
+
+```python
+import textwrap
+
+import pytest
+
+from core.plugin_loader import PluginHost
+
+
+def write_plugin(tmp_path, name, source):
+    d = tmp_path / name
+    d.mkdir()
+    (d / "plugin.py").write_text(source, encoding="utf-8")
+    return d
+
+
+GOOD_SOURCE = textwrap.dedent('''
+    from core.plugin import Plugin
+
+    class GoodPlugin(Plugin):
+        name = "good"
+        def on_activate(self, app):
+            app.bus.publish("plugin.activated", self.name)
+''')
+
+BAD_SOURCE = textwrap.dedent('''
+    from core.plugin import Plugin
+
+    class BadPlugin(Plugin):
+        name = "bad"
+        def on_activate(self, app):
+            raise RuntimeError("boom")
+''')
+
+
+def test_discover_finds_plugins(tmp_path):
+    write_plugin(tmp_path, "a", GOOD_SOURCE)
+    host = PluginHost(str(tmp_path))
+    host.load_and_activate(app=None)
+    assert {i["name"] for i in host.items} == {"good"}
+
+
+def test_failure_isolated(tmp_path):
+    write_plugin(tmp_path, "a", GOOD_SOURCE)
+    write_plugin(tmp_path, "b", BAD_SOURCE)
+    host = PluginHost(str(tmp_path))
+    host.load_and_activate(app=None)
+    by_name = {i["name"]: i for i in host.items}
+    assert by_name["bad"]["disabled"] is True
+    assert "boom" in by_name["bad"]["error"]
+    assert by_name["good"]["disabled"] is False
+
+
+def test_module_missing_plugin_class(tmp_path):
+    d = write_plugin(tmp_path, "a", "import math\n")
+    host = PluginHost(str(tmp_path))
+    host.load_and_activate(app=None)
+    assert host.items == []
+
+
+def test_deactivate_all(tmp_path):
+    write_plugin(tmp_path, "a", GOOD_SOURCE)
+    host = PluginHost(str(tmp_path))
+    host.load_and_activate(app=None)
+    host.deactivate_all()
+    assert host.items == []
+```
+
+- [ ] **步骤 2：运行测试验证失败**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_plugin_loader.py -v`
+预期：FAIL（ModuleNotFoundError: core.plugin_loader）。
+
+- [ ] **步骤 3：编写最少实现**
+
+`core/plugin.py`：
+
+```python
+from abc import ABC
+
+
+class Plugin(ABC):
+    """插件基类。name 必填；子类实现生命周期钩子。"""
+
+    name: str = ""
+
+    def on_activate(self, app) -> None:  # app: api.AppContext
+        """激活时调用，可在此订阅事件、访问引擎。"""
+
+    def on_deactivate(self) -> None:
+        """停用时调用，用于清理。"""
+
+    def create_panel(self):
+        """可选：返回一个 QWidget 挂进主窗口“插件”Tab；无面板插件返回 None。"""
+        return None
+```
+
+`core/plugin_loader.py`：
+
+```python
+import importlib.util
+from pathlib import Path
+from typing import List, Optional
+
+from core.plugin import Plugin
+
+
+class PluginHost:
+    """扫描 plugins/ 目录、加载并激活插件；异常隔离，不影响宿主。"""
+
+    def __init__(self, plugins_dir: str):
+        self._dir = Path(plugins_dir)
+        self.items: List[dict] = []  # {"name","instance","error","disabled"}
+
+    def _discover(self) -> List[Path]:
+        if not self._dir.exists():
+            return []
+        return sorted(p / "plugin.py" for p in self._dir.iterdir()
+                      if p.is_dir() and (p / "plugin.py").exists())
+
+    def load_and_activate(self, app) -> None:
+        for plugin_py in self._discover():
+            item = {"name": plugin_py.parent.name, "instance": None,
+                    "error": None, "disabled": False}
+            try:
+                mod = self._import_plugin(plugin_py)
+                inst = next((c for c in mod.__dict__.values()
+                             if isinstance(c, type) and issubclass(c, Plugin) and c is not Plugin), None)
+                if inst is None:
+                    self.items.append(item)  # 未定义插件类：跳过
+                    continue
+                item["name"] = inst.name or item["name"]
+                plugin = inst()
+                plugin.on_activate(app)
+                item["instance"] = plugin
+            except Exception as exc:
+                item["error"] = f"{type(exc).__name__}: {exc}"
+                item["disabled"] = True
+            self.items.append(item)
+
+    def deactivate_all(self) -> None:
+        for item in self.items:
+            inst = item["instance"]
+            if inst is not None and not item.get("disabled"):
+                try:
+                    inst.on_deactivate()
+                except Exception:
+                    pass
+        self.items.clear()
+
+    @staticmethod
+    def _import_plugin(path: Path):
+        module_name = f"_plugin_{path.parent.name}"
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+```
+
+- [ ] **步骤 4：运行测试验证通过**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_plugin_loader.py -v`
+预期：PASS（4 个用例全过）。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add core/plugin.py core/plugin_loader.py tests/test_plugin_loader.py
+git commit -m "feat: 插件接口与加载器（失败隔离）"
+```
+
+---
+
+## 任务 17：SDK 应用上下文 `api.py`（TDD）
+
+**文件：**
+- 创建：`api.py`
+- 测试：`tests/test_api.py`
+- 依赖：任务 5 `MidiEngine`、任务 3/4 `BindingConfig`/`Matcher`、任务 15 `EventBus`
+
+**设计：** `AppContext` 聚合引擎/总线/配置/匹配器，统一分发输入消息到总线（`midi.message` → matcher → `midi.signal`），并提供 `send_midi`（发送 + 发布 `midi.sent`）。`api.create_app()` 构造上下文并记住默认实例，`api.on(topic)` 装饰器订阅默认实例。`app.start()/stop()` 提供无 GUI 的调度线程。
+
+- [ ] **步骤 1：编写失败的测试**
+
+`tests/test_api.py`：
+
+```python
+import mido
+import pytest
+
+import api
+from midi.parser import ParsedMessage
+
+
+def test_create_app_context():
+    app = api.create_app()
+    assert app.engine is not None and app.bus is not None and app.matcher is not None
+
+
+def test_on_decorator_subscribes_default(tmp_path):
+    got = []
+    api.create_app(bindings_path=str(tmp_path / "b.json"))
+    captured = {}
+
+    @api.on("midi.message")
+    def cb(msg):
+        got.append(msg)
+
+    captured["parsed"] = ParsedMessage(type="note_on", channel=9, values={"note": 36})
+    api._DEFAULT_APP.bus.publish("midi.message", captured["parsed"])
+    assert got and got[0].type == "note_on"
+
+
+def test_dispatch_publishes_signal():
+    app = api.create_app()
+    from core.bindings import Binding, BindingSource
+    app.config.bindings = [Binding(signal="boom", sources=[
+        BindingSource.from_dict({"type": "midi", "event": "note_on", "note": 36})])]
+    app.matcher = api.Matcher(app.config)
+    got = []
+    app.bus.subscribe("midi.signal", got.append)
+    app._on_parsed(ParsedMessage(type="note_on", channel=0, values={"note": 36, "velocity": 1}))
+    assert got and "boom" in got[0]["signals"]
+
+
+def test_send_midi_publishes_sent(monkeypatch):
+    app = api.create_app()
+    got = []
+    app.bus.subscribe("midi.sent", got.append)
+    monkeypatch.setattr(app.engine, "send_message", lambda *args, **kwargs: None)
+    app.send_midi("note_on", channel=0, note=60)
+    assert got and got[0]["type"] == "note_on"
+```
+
+- [ ] **步骤 2：运行测试验证失败**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_api.py -v`
+预期：FAIL（ModuleNotFoundError: api）。
+
+- [ ] **步骤 3：编写最少实现**
+
+`api.py`：
+
+```python
+"""SDK 统一入口：AppContext 聚合引擎/事件总线/绑定配置/匹配器。"""
+
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Dict, Optional, Set
+
+from core.bindings import BindingConfig
+from core.events import EventBus
+from core.matcher import Matcher
+from midi.engine import MidiEngine
+from midi.parser import ParsedMessage
+
+_DEFAULT_APP: Optional["AppContext"] = None
+
+TOPIC_MESSAGE = "midi.message"
+TOPIC_SIGNAL = "midi.signal"
+TOPIC_SENT = "midi.sent"
+TOPIC_KEY = "key.pressed"
+TOPIC_BINDING = "binding.changed"
+
+
+@dataclass
+class AppContext:
+    engine: MidiEngine
+    bus: EventBus
+    config: BindingConfig
+    matcher: Matcher
+    bindings_path: Optional[str] = field(default=None, repr=False)
+    _thread: Optional[threading.Thread] = field(default=None, repr=False)
+    _running: bool = field(default=False, repr=False)
+
+    # ---- 事件订阅便捷方法 ----
+    def on(self, topic: str, cb: Callable) -> int:
+        return self.bus.subscribe(topic, cb)
+
+    def save_bindings(self) -> None:
+        if self.bindings_path:
+            self.config.to_file(self.bindings_path)
+
+    # ---- 输入分发（GUI 主循环或 headless 线程调用）----
+    def _on_parsed(self, parsed: ParsedMessage) -> None:
+        self.bus.publish(TOPIC_MESSAGE, parsed)
+        signals = self.matcher.signals_for_parsed(parsed)
+        if signals:
+            self.bus.publish(TOPIC_SIGNAL, {"signals": signals, "parsed": parsed})
+
+    def on_key(self, key: str) -> None:
+        self.bus.publish(TOPIC_KEY, key)
+        signals = self.matcher.signals_for_key(key)
+        if signals:
+            self.bus.publish(TOPIC_SIGNAL, {"signals": signals, "key": key})
+
+    def open_input(self, name: str) -> None:
+        self.engine.open_input(name, callback=self._on_parsed)
+
+    def close_inputs(self) -> None:
+        self.engine.close_inputs()
+
+    # ---- 发送 ----
+    def send_midi(self, type_: str, channel: int = 0, **kwargs) -> None:
+        self.engine.send_message(type_, channel=channel, **kwargs)
+        self.bus.publish(TOPIC_SENT, {"type": type_, "channel": channel, "values": kwargs})
+
+    # ---- 无 GUI 调度线程 ----
+    def start(self) -> None:
+        if self._running:
+            return
+        self._running = True
+        self._thread = threading.Thread(target=self._loop, daemon=True)
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._running = False
+        if self._thread:
+            self._thread.join(timeout=1.0)
+            self._thread = None
+
+    def _loop(self) -> None:
+        while self._running:
+            for parsed in self.engine.drain():
+                self._on_parsed(parsed)
+            time.sleep(0.02)
+
+
+def create_app(bindings_path: Optional[str] = None) -> AppContext:
+    global _DEFAULT_APP
+    config = BindingConfig.from_file(bindings_path) if bindings_path else BindingConfig()
+    app = AppContext(engine=MidiEngine(), bus=EventBus(), config=config,
+                     matcher=Matcher(config), bindings_path=bindings_path)
+    _DEFAULT_APP = app
+    return app
+
+
+def on(topic: str):
+    """装饰器：订阅默认实例（需先调用 create_app()）。"""
+
+    def deco(cb: Callable) -> Callable:
+        if _DEFAULT_APP is None:
+            raise RuntimeError("请先调用 api.create_app()")
+        _DEFAULT_APP.bus.subscribe(topic, cb)
+        return cb
+
+    return deco
+
+
+# 重导出常用符号，供第三方直接使用
+from core.bindings import Binding, BindingSource  # noqa: E402  (pylint 忽略导入顺序)
+from core.events import EventBus  # noqa: E402
+from midi.parser import ParsedMessage  # noqa: E402
+```
+
+- [ ] **步骤 4：运行测试验证通过**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_api.py -v`
+预期：PASS（4 个用例全过）。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add api.py tests/test_api.py
+git commit -m "feat: SDK 应用上下文（事件分发/发送/无 GUI 调度）"
+```
+
+---
+
+## 任务 18：插件宿主 UI 与主窗口接线 `ui/plugin_tabs.py`（TDD）
+
+**文件：**
+- 创建：`ui/plugin_tabs.py`
+- 修改：`ui/main_window.py`（主窗口改经 Api/AppContext 分发并挂插件 Tab）
+- 修改：`app.py`（加载插件目录、关闭时卸载插件）
+- 测试：追加到 `tests/test_ui_components.py`
+
+**设计：** 主窗口改为"主界面/插件"两类 Tab。`PluginTabs(QTabWidget)`：`mount(name, widget)` 挂插件面板；`show_error(name, error)` 显示加载失败信息。主窗口分发改为订阅 `AppContext.bus` 的 `midi.message` / `midi.signal` / `key.pressed`（矩阵、日志、虚拟输出都靠总线事件驱动），发送面板改走 `app.send_midi`。
+
+- [ ] **步骤 1：编写失败的测试（追加）**
+
+```python
+from PyQt6.QtWidgets import QLabel
+from ui.plugin_tabs import PluginTabs
+
+
+def test_plugin_tabs_mount(qtbot):
+    t = PluginTabs()
+    qtbot.addWidget(t)
+    t.mount("插件A", QLabel("hello"))
+    assert t.count() == 1
+    assert t.tabText(0) == "插件A"
+
+
+def test_plugin_tabs_error(qtbot):
+    t = PluginTabs()
+    qtbot.addWidget(t)
+    t.show_error("bad", "boom")
+    assert "bad" in t.tabText(0)
+    assert "boom" in t.widget(0).text()
+```
+
+- [ ] **步骤 2：运行测试验证失败**
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_ui_components.py -v`
+预期：FAIL（ModuleNotFoundError: ui.plugin_tabs）。
+
+- [ ] **步骤 3：编写最少实现**
+
+`ui/plugin_tabs.py`：
+
+```python
+from PyQt6.QtWidgets import QLabel, QTabWidget
+
+from ui import style_qss as QSS
+
+
+class PluginTabs(QTabWidget):
+    """承载“主界面”与各插件面板的 Tab 容器。"""
+
+    def mount(self, name: str, widget) -> None:
+        self.addTab(widget, name)
+
+    def show_error(self, name: str, error: str) -> None:
+        box = QLabel(f"插件 {name} 加载失败：{error}")
+        box.setWordWrap(True)
+        box.setStyleSheet(f"color: {QSS.ERROR}; padding: 8px;")
+        self.addTab(box, name)
+```
+
+改写 `ui/main_window.py`（替换任务 13 的实现，统一经 AppContext 走总线）：
+
+`ui/main_window.py`（任务 18 完整实现）：
+
+```python
+from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtWidgets import QMainWindow, QSplitter, QStatusBar, QTabWidget, QVBoxLayout, QWidget
+
+import api
+from core.plugin_loader import PluginHost
+from midi.keyboard_input import KeyboardWatcher, normalize_key
+from midi.parser import MIDO_TYPE_MAP, ParsedMessage
+from ui.bindings_view import BindingsView
+from ui.channel_matrix import ChannelMatrix
+from ui.log_view import LogView
+from ui.plugin_tabs import PluginTabs
+from ui.port_panel import PortPanel
+from ui.send_panel import SendPanel
+
+
+class MainWindow(QMainWindow):
+    def __init__(self, app: "api.AppContext", plugins_dir: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("MIDI 调试工具")
+        self.resize(1080, 720)
+        self.app = app
+
+        central = QWidget()
+        self.setCentralWidget(central)
+        root = QVBoxLayout(central)
+        root.setContentsMargins(6, 6, 6, 6)
+
+        self.port_panel = PortPanel(app.engine)
+
+        self.tabs = QTabWidget()
+        main_page = QWidget()
+        main_layout = QVBoxLayout(main_page)
+        split = QSplitter(Qt.Orientation.Vertical)
+        top_split = QSplitter(Qt.Orientation.Horizontal)
+        self.matrix = ChannelMatrix()
+        self.log_view = LogView()
+        top_split.addWidget(self.matrix)
+        top_split.addWidget(self.log_view)
+        top_split.setSizes([220, 800])
+        split.addWidget(top_split)
+        self.send_panel = SendPanel(send_cb=self._on_send)
+        split.addWidget(self.send_panel)
+        self.bindings_view = BindingsView(app.config)
+        split.addWidget(self.bindings_view)
+        split.setSizes([420, 60, 220])
+        main_layout.addWidget(split)
+        self.tabs.addTab(main_page, "主界面")
+
+        # 插件加载与挂载（失败隔离）
+        self.plugin_tabs = PluginTabs()
+        self.plugin_host = PluginHost(plugins_dir)
+        self.plugin_host.load_and_activate(app)
+        for item in self.plugin_host.items:
+            if item.get("disabled"):
+                self.plugin_tabs.show_error(item["name"], item.get("error") or "未知错误")
+                continue
+            try:
+                panel = item["instance"].create_panel()
+            except Exception as exc:
+                self.plugin_tabs.show_error(item["name"], f"面板构造失败: {exc}")
+                continue
+            if panel is not None:
+                self.plugin_tabs.mount(item["name"], panel)
+        if self.plugin_tabs.count():
+            self.tabs.addTab(self.plugin_tabs, "插件")
+
+        root.addWidget(self.port_panel)
+        root.addWidget(self.tabs, 1)
+        self.setStatusBar(QStatusBar())
+
+        # 输入轮询：统一经 app._on_parsed 分发到总线
+        self._timer = QTimer(self)
+        self._timer.setInterval(30)
+        self._timer.timeout.connect(self._poll_inputs)
+        self._timer.start()
+
+        # 设备切换
+        self.port_panel.input_combo.currentTextChanged.connect(self._on_input_changed)
+        self.port_panel.output_combo.currentTextChanged.connect(self._on_output_changed)
+
+        # 总线订阅（UI 自身也是订阅者）
+        app.on(api.TOPIC_MESSAGE, self._on_message)
+        app.on(api.TOPIC_SIGNAL, self._on_signal)
+        app.on(api.TOPIC_SENT, self._on_sent)
+
+        # 键盘（焦点内捕获，交由 app 分发）
+        self._watcher = KeyboardWatcher(on_key=self._on_key_down, use_global_hook=False)
+
+    # ---- 设备 ----
+    def _on_input_changed(self, name: str) -> None:
+        self.app.close_inputs()
+        if name and name != "（无）":
+            self.app.open_input(name)
+            self.statusBar().showMessage(f"已打开输入端口: {name}", 3000)
+
+    def _on_output_changed(self, name: str) -> None:
+        if name and name != "（无）":
+            self.app.engine.open_output(name)
+            self.statusBar().showMessage(f"已打开输出端口: {name}", 3000)
+
+    # ---- 总线事件 ----
+    def _poll_inputs(self) -> None:
+        for parsed in self.app.engine.drain():
+            self.app._on_parsed(parsed)
+
+    def _on_message(self, parsed: ParsedMessage) -> None:
+        if parsed.channel is not None:
+            self.matrix.pulse(parsed.channel)
+        signals = self.app.matcher.signals_for_parsed(parsed)
+        alias = " / ".join(sorted(signals)) if signals else None
+        self.log_view.append_message(parsed, source="in", alias=alias)
+
+    def _on_signal(self, payload: dict) -> None:
+        signals = payload.get("signals", set())
+        for b in self.app.config.bindings:
+            if b.signal in signals and b.virtual_midi:
+                vm = b.virtual_midi
+                try:
+                    self.app.engine.send_message(vm.get("type", "note_on"),
+                                                 channel=vm.get("channel", 0),
+                                                 **{k: v for k, v in vm.items() if k not in ("type", "channel")})
+                except RuntimeError as exc:
+                    self.statusBar().showMessage(f"虚拟输出失败: {exc}", 3000)
+
+    def _on_sent(self, payload: dict) -> None:
+        self.log_view.append_message(_sent_message(payload), source="out")
+
+    def _on_send(self, type_: str, channel: int, kw: dict) -> None:
+        try:
+            self.app.send_midi(type_, channel=channel, **kw)
+        except RuntimeError as exc:
+            self.statusBar().showMessage(str(exc), 3000)
+
+    # ---- 键盘 ----
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        self._on_key_down(normalize_key(event.keyCombination().toString()))
+        super().keyPressEvent(event)
+
+    def _on_key_down(self, key: str) -> None:
+        self.app.on_key(key)
+
+    def closeEvent(self, event) -> None:
+        self._watcher.stop_global()
+        self.plugin_host.deactivate_all()
+        self.app.engine.close_all()
+        self.app.save_bindings()
+        super().closeEvent(event)
+
+
+def _sent_message(payload: dict) -> ParsedMessage:
+    import mido
+
+    type_ = payload["type"]
+    channel = payload["channel"]
+    values = payload["values"]
+    raw_hex = " ".join(f"{b:02X}" for b in
+                       mido.Message(MIDO_TYPE_MAP.get(type_, type_), channel=channel, **values).bytes())
+    return ParsedMessage(type=type_, channel=channel, values=values, raw_hex=raw_hex,
+                         description=f"发送 {type_}")
+```
+
+- 构造函数改为 `MainWindow(app: AppContext, plugins_dir: str)`；`app.py` 相应改为先 `create_app(...)` 再 `MainWindow(app=app, plugins_dir="plugins")`，并在 `closeEvent` 保存配置（`config.to_file` 由主窗口触发；`AppContext` 不持有路径时跳过保存）
+
+- [ ] **步骤 4：运行测试验证通过（含原主窗口测试修正）**
+
+更新任务 13 的 `test_main_window_constructs` 为：
+
+```python
+def test_main_window_constructs(qtbot, tmp_path):
+    import api
+    app = api.create_app(bindings_path=str(tmp_path / "b.json"))
+    win = MainWindow(app=app, plugins_dir=str(tmp_path / "plugins"))
+    qtbot.addWidget(win)
+    assert win.windowTitle() != ""
+```
+
+运行：`.\.venv\Scripts\python -m pytest tests/test_ui_components.py -v`
+预期：PASS。
+
+- [ ] **步骤 5：Commit**
+
+```bash
+git add ui/plugin_tabs.py ui/main_window.py app.py tests/test_ui_components.py
+git commit -m "feat: 插件宿主 UI（Tab 挂载/错误隔离）并统一总线分发"
+```
+
+---
+
+## 任务 19：示例插件与 SDK 演示、验收更新
+
+**文件：**
+- 创建：`examples/example_plugin/plugin.py`（简单练习面板插件）
+- 创建：`examples/sdk_demo.py`（无 GUI 用法演示）
+- 修改：`app.py`（默认插件目录 `plugins/`，不存在则静默跳过）
+
+- [ ] **步骤 1：编写示例插件**
+
+`examples/example_plugin/plugin.py`：
+
+```python
+from PyQt6.QtCore import Qt
+from PyQt6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
+
+from core.plugin import Plugin
+from ui import style_qss as QSS
+
+
+class NoteSentry(Plugin):
+    """示例插件：显示最后收到的 MIDI 消息，并可点击发送音符。"""
+
+    name = "note_sentry"
+
+    def on_activate(self, app):
+        self.app = app
+        app.on("midi.message", self.on_message)
+
+    def on_message(self, parsed):
+        label = getattr(self, "label", None)
+        if label is None:
+            return  # 面板尚未构造
+        label.setText(f"最后消息: ch{parsed.channel + 1 if parsed.channel is not None else '-'} "
+                      f"{parsed.type} {parsed.raw_hex}")
+
+    def create_panel(self):
+        box = QWidget()
+        v = QVBoxLayout(box)
+        self.label = QLabel("等待 MIDI 消息…")
+        self.label.setStyleSheet(f"color: {QSS.TEXT}; font-size: 14px;")
+        hint = QLabel("点击下方按钮向输出端口发送 C4 音符。")
+        hint.setStyleSheet(f"color: {QSS.MUTED};")
+        self.btn = QPushButton("发送 C4")
+        self.btn.setStyleSheet(f"background-color: {QSS.ACCENT}; color: {QSS.BG}; font-weight: 600;")
+        self.btn.clicked.connect(lambda: self.app.send_midi("note_on", channel=0, note=60, velocity=100))
+        v.addWidget(self.label)
+        v.addWidget(hint)
+        v.addWidget(self.btn)
+        v.addStretch(1)
+        return box
+```
+
+`examples/sdk_demo.py`：
+
+```python
+"""SDK 无 GUI 用法演示：python examples/sdk_demo.py [midi输入端口名]"""
+
+import sys
+import time
+
+import api
+
+
+def main() -> None:
+    app = api.create_app()
+
+    @api.on("midi.message")
+    def on_msg(parsed):
+        print(f"[{parsed.type}] ch={parsed.channel} values={parsed.values} hex={parsed.raw_hex}")
+
+    @api.on("midi.signal")
+    def on_sig(payload):
+        print(">> 信号:", payload["signals"])
+
+    port = sys.argv[1] if len(sys.argv) > 1 else None
+    if port:
+        app.open_input(port)
+        app.start()
+        print(f"监听 {port}，Ctrl+C 退出")
+        try:
+            while True:
+                time.sleep(0.1)
+        except KeyboardInterrupt:
+            app.stop()
+    else:
+        print("用法: python examples/sdk_demo.py <MIDI输入端口名>")
+        print("可用输入端口:", app.engine.list_inputs())
+
+
+if __name__ == "__main__":
+    main()
+```
+
+- [ ] **步骤 2：验证示例可运行（不接设备时仅打印端口列表）**
+
+运行：`.\.venv\Scripts\python examples/sdk_demo.py`
+预期：打印可用输入端口列表，无异常。
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add examples/
+git commit -m "feat: 示例插件与 SDK 演示"
+```
+
+---
+
+## 任务 20：端到端运行与平台验收
+
+**文件：** 无新增
+
+- [ ] **步骤 1：全量测试**
+
+运行：`.\.venv\Scripts\python -m pytest -v`
+预期：全部 PASS（含回环用例需 loopMIDI，未装则 skip）。
+
+- [ ] **步骤 2：平台验收清单（手动）**
+
+1. 启动 `python app.py`，把 `examples/example_plugin` 复制到 `plugins/`（或重启前建好）→ "插件"Tab 出现 example 子 Tab，面板显示"等待 MIDI 消息…"
+2. loopMIDI 回环 → 发送面板发 note_on → 插件面板实时显示"最后消息"；日志显示消息；通道矩阵点亮
+3. 点击插件面板"发送 C4" → 回环输入端再次收到（验证插件可通过 SDK 发送）
+4. 在 `plugins/` 放一个 `on_activate` 里抛异常的插件 → 重启 → 插件 Tab 显示"加载失败"，其他功能不受影响
+5. 无 GUI：`python examples/sdk_demo.py "loopMIDI Port"` → 回环发送 → 终端打印 `[note_on]` 与信号行
+
+- [ ] **步骤 3：Commit**
+
+```bash
+git add -A
+git commit -m "chore: 平台端到端验收完成"
+```
+
+---
+
 ## 自检
 
 **1. 规格覆盖度：**
@@ -1870,15 +2784,26 @@ git commit -m "chore: 手动验收完成"
 - loopMIDI 虚拟端口 → 任务 5/7/13 ✓
 - venv → 任务 1 ✓
 - 霓虹风格 QSS → 任务 8 ✓
-- 错误处理（设备拔出/loopMIDI 缺失/JSON 损坏/发送失败）→ 任务 5/7/3/13 ✓
-- 测试（单元+回环+手动）→ 各任务 ✓
+- 错误处理（设备拔出/loopMIDI 缺失/JSON 损坏/发送失败/插件异常隔离）→ 任务 5/7/3/13/16/18 ✓
+- 事件总线（订阅/发布/线程安全）→ 任务 15 ✓
+- 插件接口与加载器（失败隔离/生命周期）→ 任务 16 ✓
+- 插件宿主 UI（Tab 挂载/错误显示/纯逻辑插件无面板）→ 任务 18 ✓
+- SDK（create_app/AppContext/on 装饰器/start 无 GUI 调度/事件链）→ 任务 17 ✓
+- 示例插件与 SDK 演示 → 任务 19 ✓
+- 平台端到端验收 → 任务 20 ✓
+- 测试（单元+回环+事件链+插件+手动）→ 各任务 ✓
 
 **2. 占位符扫描：** 无 TODO/待定；每个代码步骤含完整代码。
 
 **3. 类型一致性：**
-- `ParsedMessage` 字段 `type/channel/values/raw_hex/description`、`event_key()` 在任务 2 定义，任务 4/10/13 一致使用 ✓
-- `BindingConfig.from_file/to_file`、`Binding/BindingSource.from_dict/to_dict` 在任务 3 定义，任务 12/13 一致使用 ✓
-- `MidiEngine.open_input(name, callback)/open_output/send_message(type, channel, **kw)/drain/close_all/list_inputs/list_outputs` 任务 5 定义，任务 9/13 一致使用 ✓
-- `normalize_key` 任务 6 定义，任务 13 使用 ✓
-- `detect_virtual_out_port/setup_guide` 任务 7 定义，任务 9/13 使用 ✓
-- UI 组件构造函数签名：`ChannelMatrix()`、`LogView()`、`SendPanel(send_cb=...)`、`BindingsView(config=...)`、`PortPanel(engine)` 在各自任务定义，任务 13 一致使用 ✓
+- `ParsedMessage` 字段 `type/channel/values/raw_hex/description`、`event_key()` 在任务 2 定义，任务 4/10/13/17/18 一致使用 ✓
+- `BindingConfig.from_file/to_file`、`Binding/BindingSource.from_dict/to_dict` 在任务 3 定义，任务 12/13/17 一致使用 ✓
+- `MidiEngine.open_input(name, callback)/open_output/send_message(type, channel, **kw)/drain/close_all/list_inputs/list_outputs` 任务 5 定义，任务 9/13/17/18 一致使用 ✓
+- `normalize_key` 任务 6 定义，任务 13/18 使用 ✓
+- `detect_virtual_out_port/setup_guide` 任务 7 定义，任务 9 使用 ✓
+- UI 组件构造函数签名：`ChannelMatrix()`、`LogView()`、`SendPanel(send_cb=...)`、`BindingsView(config=...)`、`PortPanel(engine)`、`PluginTabs()` 在各自任务定义，任务 13/18 一致使用 ✓
+- `EventBus.subscribe/unsubscribe/publish/clear` 任务 15 定义，任务 16/17/18 一致使用 ✓
+- `PluginHost.load_and_activate(app)/deactivate_all/items` 任务 16 定义，任务 18 一致使用 ✓
+- `AppContext` 字段与方法（engine/bus/config/matcher/bindings_path、on/_on_parsed/on_key/open_input/close_inputs/send_midi/start/stop/save_bindings）任务 17 定义，任务 18/19/20 一致使用 ✓
+- 事件主题常量 `TOPIC_MESSAGE/TOPIC_SIGNAL/TOPIC_SENT` 任务 17 定义，任务 18 一致使用 ✓
+- `MIDO_TYPE_MAP` 任务 2 定义，任务 5/13/18 一致使用 ✓
