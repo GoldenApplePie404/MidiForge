@@ -10,33 +10,30 @@ REM ---- Step 0: Python check ----
 echo [Check] Looking for Python...
 
 where python >nul 2>&1
-if errorlevel 1 (
-    echo.
-    echo [ERROR] Python not found!
-    echo.
-    echo Please install Python 3.11 or higher:
-    echo   https://www.python.org/downloads/windows/
-    echo.
-    echo IMPORTANT: check "Add Python to PATH" during installation
-    echo.
-    pause
-    exit /b 1
-)
+if errorlevel 1 goto :no_python
 
-REM Check version >= 3.11
-for /f "tokens=2 delims= " %%m in ('python --version 2^>^&1') do set PYVER=%%m
-echo [Check] Found Python %PYVER%
-for /f "tokens=1,2 delims=." %%a in ("%PYVER%") do (
-    set /a MAJ=%%a
-    set /a MIN=%%b
-)
-if %MAJ% LSS 3 goto :py_too_old
-if %MAJ% EQU 3 if %MIN% LSS 11 goto :py_too_old
+REM Let Python check its own version (avoids all bat variable-expansion pitfalls)
+python -c "import sys; sys.exit(0 if sys.version_info >= (3,11) else 1)" 2>nul
+if errorlevel 1 goto :py_too_old
+
+for /f "tokens=2 delims= " %%v in ('python --version 2^>^&1') do echo [Check] Python %%v OK
 goto :py_ok
+
+:no_python
+echo.
+echo [ERROR] Python not found!
+echo.
+echo Please install Python 3.11 or higher:
+echo   https://www.python.org/downloads/windows/
+echo.
+echo IMPORTANT: check "Add Python to PATH" during installation
+echo.
+pause
+exit /b 1
 
 :py_too_old
 echo.
-echo [ERROR] Python %PYVER% is too old. Need 3.11+.
+echo [ERROR] Python is too old. Need 3.11+.
 echo Download: https://www.python.org/downloads/windows/
 echo.
 pause
