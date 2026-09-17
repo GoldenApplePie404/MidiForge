@@ -1,13 +1,20 @@
-"""PadSentry：2×4 打击垫可视化 + 内置 wav 采样发声插件。
+"""PadSentry — 2×4 打击垫可视化 + 采样发声插件。
 
-监听连续 CC 号范围（如 102-109），踩哪个 pad 哪个格子发光 + 播放对应鼓组 wav。
-首次运行自动合成 GM 鼓组采样到 samples/ 目录。
+架构:
+    MIDI CC 消息 → EventBus → PadSentry._on_message() → channel 池 round-robin 播放
+                                                      → _PadButton.pulse() 发光衰减
+
+关键设计决策（踩坑记录）:
+    1. FL Studio Edison 导出的 wav format tag 是 0x674F（"Og"），
+       data chunk 里实际装的是 Ogg Vorbis 压缩流，不是 PCM。
+       解法：在外部脚本里抽出 Ogg 再 ffmpeg 转 PCM，**用户原始采样备份到 samples_backup/**。
+    2. pygame.mixer.Sound.play() 在 channel 全满时静默返回 None（丢音），
+       改用 Channel(idx).play() 预分配固定 channel 池，忙则打断最老的（打击乐 roll 自然效果）。
+    3. 8 pad × 4 channel = 32 条 channel，远高于原全局 8 条，
+       彻底解决长音（Crash 1.28s / Tom 4s）占住 channel 饿死其他 pad 的问题。
 """
 
 import json
-import shutil
-import struct
-import subprocess
 import sys
 import wave
 from pathlib import Path
@@ -24,6 +31,7 @@ from ui import style_qss as QSS
 
 
 # ---- 默认配置 ----
+# 仅在 config.json 不存在时用作兜底；用户改 wav 文件名/CC 号都在 config.json 里。
 DEFAULT_CONFIG = {
     "cc_range": [102, 109],
     "volume": 0.75,
@@ -43,32 +51,38 @@ DEFAULT_CONFIG = {
 
 
 def _ensure_valid_wav(path: Path) -> bool:
-    """检查 wav 是否能被 pygame 正常加载。不做任何自动转码/覆盖——用户文件神圣不可侵犯。"""
+    """检查 wav 是否能被 pygame 正常加载。
+
+    注意：**不做任何自动转码/覆盖**。用户采样文件神圣不可侵犯，
+    FL Studio Edison 导出的 Ogg-in-WAV 问题由用户自己在外部脚本处理。
+    """
     try:
         with wave.open(str(path), "rb") as w:
-            w.getnframes()  # 能打开就是合法 wav
+            w.getnframes()
             return True
     except wave.Error:
         pass
     try:
-        # 只检查 header 完整性，不修 header
+        # 退一步：header 是合法 RIFF/WAVE 就算通过，
+        # pygame 对部分非标准 format tag（如 0x674F）有一定容忍度
         with open(path, "rb") as f:
             raw = f.read(12)
         if raw[:4] == b"RIFF" and raw[8:12] == b"WAVE":
-            return True  # pygame 能处理非标准 tag
+            return True
     except OSError:
         pass
     return False
 
 
 def _ensure_samples(samples_dir: Path) -> None:
-    """确保采样目录存在可用的 wav：自动合成缺失文件 + 修复非标准 header。"""
-    # 扫描 + 修复已有 wav
+    """确保 samples/ 目录下至少有可用 wav。
+
+    已有文件不动（skip_existing=True），只在目录为空时调 _synth 合成 GM 鼓组。
+    """
     if samples_dir.exists():
         for wav in samples_dir.glob("*.wav"):
             _ensure_valid_wav(wav)
 
-    # 合成缺失文件（不会覆盖已有）
     if not samples_dir.exists() or not any(samples_dir.glob("*.wav")):
         try:
             sys.path.insert(0, str(Path(__file__).parent))
@@ -79,13 +93,19 @@ def _ensure_samples(samples_dir: Path) -> None:
 
 
 class _PadButton(QFrame):
-    """单个 pad 的可视化：触发时亮度脉冲，自然衰减。"""
+    """单个 pad 的可视化格子：踩下去发光（亮度=1.0），自然衰减到 0。
+
+    用 `pyqtProperty` 让 `brightness` 可以在 QSS 里被动态设置，
+    这里用纯 Python 插值 base_color → glow_color，避免 QSS 重新 parse 的开销。
+    """
 
     def __init__(self, label: str, note_name: str):
         super().__init__()
         self.setObjectName("padCell")
         self.setFixedSize(88, 88)
         self._brightness = 0.0
+        # 衰减定时器：interval = duration_ms / 20，每次 step -= 0.05，
+        # 所以 300ms 脉光大 约 20 步 × 15ms/步 = 300ms 归零
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._decay)
         self._pulse_ms = 300
@@ -116,6 +136,7 @@ class _PadButton(QFrame):
         self._refresh_style()
 
     def _refresh_style(self):
+        # 线性插值 base ↔ glow，brightness=1 时完全变成 glow 色
         base_bg = QColor(QSS.CARD)
         glow = QColor(QSS.ACCENT)
         r = int(base_bg.red() * (1 - self._brightness) + glow.red() * self._brightness)
@@ -130,6 +151,7 @@ class _PadButton(QFrame):
         self._pulse_ms = duration_ms
         self._brightness = 1.0
         self._refresh_style()
+        # 20 步衰减，interval 至少 8ms（Qt 定时器下限）
         interval = max(8, duration_ms // 20)
         self._timer.start(interval)
 
@@ -142,7 +164,20 @@ class _PadButton(QFrame):
 
 
 class PadSentry(Plugin):
-    """2×4 打击垫可视化 + 内置 wav 采样发声。"""
+    """2×4 打击垫插件主类。
+
+    音频播放架构（关键！）:
+        pygame.mixer.set_num_channels(32)   # 8 pad × 4 独占 channel
+        每个 pad 分配 [base+0, base+1, base+2, base+3] 四条 channel
+        播放时 round-robin 选下一条：channel 空闲就立即播，忙则打断最老的。
+
+        为什么不用 Sound.play()？
+          Sound.play() 从**全局池**找空闲 channel，找不到 → 静默返回 None → 丢音。
+          Channel(idx).play() 强制指定 channel，永远不返回 None。
+        为什么每个 pad 4 条？
+          极端场景：Crash（1.28s 长音）连打，4 条够塞下 4 层叠加，
+          第 5 次触发会打断第 1 层（打击乐自然 roll 效果，人耳听不出违和）。
+    """
 
     name = "pad_sentry"
     version = "1.0"
@@ -154,29 +189,35 @@ class PadSentry(Plugin):
         self._config_path = self._plugin_dir / "config.json"
         self._samples_dir = self._plugin_dir / "samples"
 
-        # 确保采样文件存在 + 修复格式
+        # 确保采样文件存在（首次运行自动合成；已有则跳过）
         _ensure_samples(self._samples_dir)
 
         self.config = self._load_config()
         self._pad_map = {p["cc"]: p for p in self.config["pads"]}
 
-        # 初始化 pygame mixer（多轨播放，支持同时踩多个 pad）
+        # 初始化 pygame mixer
+        # frequency=44100 Hz 标准采样率 / size=-16 有符号 16-bit / channels=2 立体声 / buffer=512 低延迟
         try:
             if not pygame.mixer.get_init():
                 pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
         except pygame.error as e:
             print(f"[PadSentry] pygame.mixer 初始化失败: {e}")
 
-        # 每个 pad 独占 4 条 channel（连打/并发不丢音）
+        # ---- channel 池分配 ----
+        # 核心思路：不依赖 Sound.play() 的全局空闲 channel 查找，
+        # 每个 pad 独占 4 条，round-robin 轮换，永不丢音。
         CHANNELS_PER_PAD = 4
         self._channels_per_pad = CHANNELS_PER_PAD
         total = len(self.config["pads"]) * CHANNELS_PER_PAD
         pygame.mixer.set_num_channels(total)
 
-        # 预加载 Sound 对象 + 为每个 pad 分配 channel 池
-        self._sfx = {}            # cc -> pygame.mixer.Sound
-        self._pad_channels = {}   # cc -> list[Channel]
-        self._pad_chan_idx = {}   # cc -> int（round-robin 索引）
+        # 三套并行数据：
+        #   _sfx         cc → Sound 对象（预加载到内存，零磁盘 IO 延迟）
+        #   _pad_channels cc → [Channel, Channel, Channel, Channel]
+        #   _pad_chan_idx cc → 当前轮询到第几条
+        self._sfx = {}
+        self._pad_channels = {}
+        self._pad_chan_idx = {}
         for i, pad in enumerate(self.config["pads"]):
             wav_path = self._samples_dir / pad["wav"]
             base_ch = i * CHANNELS_PER_PAD
@@ -192,7 +233,7 @@ class PadSentry(Plugin):
                 except pygame.error as e:
                     print(f"[PadSentry] 加载 {wav_path.name} 失败: {e}")
 
-        # 订阅 MIDI
+        # 订阅 MIDI 消息总线
         app.subscribe("midi.message", self._on_message)
 
     def on_deactivate(self):
@@ -203,6 +244,10 @@ class PadSentry(Plugin):
 
     # ---- 消息处理 ----
     def _on_message(self, parsed):
+        """EventBus 回调：每条 MIDI 消息进来一次。
+
+        只响应 cc 类型 + cc 号在我们监听范围内 + value > 0（松开忽略）。
+        """
         if parsed.type != "cc":
             return
         cc = parsed.values.get("control")
@@ -210,16 +255,16 @@ class PadSentry(Plugin):
         if cc not in self._pad_map:
             return
         if val <= 0:
-            return  # 松开忽略
+            return
 
         pad = self._pad_map[cc]
 
-        # UI 脉冲
+        # UI：找到对应的 _PadButton 做脉冲发光
         pad_btn = getattr(self, "_pad_btns", {}).get(cc)
         if pad_btn is not None:
             pad_btn.pulse(self.config.get("pad_pulse_ms", 300))
 
-        # 播放采样（每个 pad 独占 4 channel，round-robin 轮换，永不丢音）
+        # 音频：round-robin 选 channel 播放
         if self.config.get("enabled", True):
             sfx = self._sfx.get(cc)
             if sfx is not None:
@@ -227,28 +272,28 @@ class PadSentry(Plugin):
                 channels = self._pad_channels[cc]
                 idx = self._pad_chan_idx[cc]
                 self._pad_chan_idx[cc] = (idx + 1) % len(channels)
-                channels[idx].play(sfx)  # channel 正忙则自动打断（打击乐自然 roll 效果）
+                # Channel.play() 永不返回 None；忙则打断最老的
+                channels[idx].play(sfx)
 
     # ---- UI ----
     def create_panel(self) -> QWidget:
+        """插件面板：2×4 网格 + 发声开关 + 音量滑块 + 采样就绪状态。"""
         box = QWidget()
         box.setStyleSheet(f"background-color: {QSS.BG}; border-radius: 8px;")
         root = QVBoxLayout(box)
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        # 标题
         title = QLabel("🎛 PadSentry · 指鼓演奏")
         title.setStyleSheet(f"color: {QSS.TEXT}; font-size: 14px; font-weight: 700;")
         root.addWidget(title)
 
-        # CC 范围提示
         rng = self.config.get("cc_range", [0, 0])
         hint = QLabel(f"监听 CC #{rng[0]}~#{rng[1]}（共 {len(self.config['pads'])} 个 pad） · 内置 GM 鼓组")
         hint.setStyleSheet(f"color: {QSS.MUTED}; font-size: 11px;")
         root.addWidget(hint)
 
-        # 2×4 网格
+        # 2×4 网格（i // 4 = 行, i % 4 = 列）
         grid_wrap = QGridLayout()
         grid_wrap.setSpacing(8)
         self._pad_btns = {}
@@ -261,7 +306,7 @@ class PadSentry(Plugin):
         row_wrap.setLayout(grid_wrap)
         root.addWidget(row_wrap)
 
-        # 控制条
+        # 控制条：发声开关 + 音量滑块
         ctrl = QHBoxLayout()
 
         self.enable_cb = QCheckBox("发声")
@@ -292,7 +337,7 @@ class PadSentry(Plugin):
 
         root.addLayout(ctrl)
 
-        # 采样状态提示
+        # 采样就绪提示（loaded/total），能直观看到哪些 wav 缺失
         loaded = len(self._sfx)
         total = len(self.config["pads"])
         status = QLabel(f"采样就绪 {loaded}/{total}")
@@ -309,12 +354,14 @@ class PadSentry(Plugin):
     def _on_volume(self, v: int):
         self.config["volume"] = v / 100.0
         self.vol_val.setText(f"{v}%")
+        # 所有已加载的 Sound 统一调音量
         for sfx in self._sfx.values():
             sfx.set_volume(self.config["volume"])
         self._save_config()
 
     # ---- 配置持久化 ----
     def _load_config(self) -> dict:
+        """读 config.json；不存在或损坏则用 DEFAULT_CONFIG 写一份。"""
         if self._config_path.exists():
             try:
                 with open(self._config_path, encoding="utf-8") as f:
