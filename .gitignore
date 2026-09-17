@@ -3,3 +3,17 @@ __pycache__/
 *.pyc
 .pytest_cache/
 config/bindings.json
+
+# IDE / AI agent
+docs/superpowers/
+.trae/
+.cursor/
+.vscode/
+.idea/
+
+# 运行时产物
+*.log
+fl.json
+
+# 用户采样备份（纯运行时生成的安全副本）
+plugins/pad_sentry/samples_backup/
