@@ -1,17 +1,16 @@
 """PadSentry — 2×4 打击垫可视化 + 采样发声插件。
 
 架构:
-    MIDI CC 消息 → EventBus → PadSentry._on_message() → channel 池 round-robin 播放
-                                                      → _PadButton.pulse() 发光衰减
+    MIDI CC 消息 → EventBus("midi.cc" 细分 topic) → PadSentry._on_cc()
+    → app.audio.play() round-robin 播放（宿主统一管 mixer + channel 池）
+    → _PadButton.pulse() 发光衰减
 
-关键设计决策（踩坑记录）:
-    1. FL Studio Edison 导出的 wav format tag 是 0x674F（"Og"），
-       data chunk 里实际装的是 Ogg Vorbis 压缩流，不是 PCM。
-       解法：在外部脚本里抽出 Ogg 再 ffmpeg 转 PCM，**用户原始采样备份到 samples_backup/**。
-    2. pygame.mixer.Sound.play() 在 channel 全满时静默返回 None（丢音），
-       改用 Channel(idx).play() 预分配固定 channel 池，忙则打断最老的（打击乐 roll 自然效果）。
-    3. 8 pad × 4 channel = 32 条 channel，远高于原全局 8 条，
-       彻底解决长音（Crash 1.28s / Tom 4s）占住 channel 饿死其他 pad 的问题。
+v0.3 迁移:
+    - pygame.mixer.init()  → 宿主 app.audio.init_if_needed() 统一管
+    - 自己分 channel 池    → app.audio.allocate_pool("pad_sentry", 32)
+    - Sound.play() 丢音    → app.audio.play(sfx, plugin_name="pad_sentry")
+    - print()              → app.log.info("加载 %s", name)
+    - 订阅 "midi.message"  → 订阅 "midi.cc"（宿主按 type 过滤）
 """
 
 import json
@@ -89,6 +88,7 @@ def _ensure_samples(samples_dir: Path) -> None:
             import _synth
             _synth.generate_all(samples_dir, skip_existing=True)
         except Exception as e:
+            # 此时还没 on_activate，无法用 app.log——保留 print 兜底
             print(f"[PadSentry] 合成采样失败: {e}")
 
 
@@ -185,6 +185,7 @@ class PadSentry(Plugin):
 
     def on_activate(self, app):
         self.app = app
+        self.log = app.log
         self._plugin_dir = Path(__file__).parent
         self._config_path = self._plugin_dir / "config.json"
         self._samples_dir = self._plugin_dir / "samples"
@@ -195,61 +196,44 @@ class PadSentry(Plugin):
         self.config = self._load_config()
         self._pad_map = {p["cc"]: p for p in self.config["pads"]}
 
-        # 初始化 pygame mixer
-        # frequency=44100 Hz 标准采样率 / size=-16 有符号 16-bit / channels=2 立体声 / buffer=512 低延迟
-        try:
-            if not pygame.mixer.get_init():
-                pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
-        except pygame.error as e:
-            print(f"[PadSentry] pygame.mixer 初始化失败: {e}")
-
-        # ---- channel 池分配 ----
-        # 核心思路：不依赖 Sound.play() 的全局空闲 channel 查找，
-        # 每个 pad 独占 4 条，round-robin 轮换，永不丢音。
+        # ---- 用宿主统一音频服务 ----
+        # 宿主统一管理 pygame.mixer.init()，多插件共存不会冲突。
         CHANNELS_PER_PAD = 4
         self._channels_per_pad = CHANNELS_PER_PAD
         total = len(self.config["pads"]) * CHANNELS_PER_PAD
-        pygame.mixer.set_num_channels(total)
 
-        # 三套并行数据：
-        #   _sfx         cc → Sound 对象（预加载到内存，零磁盘 IO 延迟）
-        #   _pad_channels cc → [Channel, Channel, Channel, Channel]
-        #   _pad_chan_idx cc → 当前轮询到第几条
-        self._sfx = {}
-        self._pad_channels = {}
-        self._pad_chan_idx = {}
-        for i, pad in enumerate(self.config["pads"]):
+        audio = app.audio
+        audio.init_if_needed()                                 # 宿主统一 init
+        audio.allocate_pool("pad_sentry", channel_count=total)  # 独占池
+
+        # 预加载 sfx 到宿主音频服务（全局音量自动生效）
+        self._sfx = {}  # cc → _SfxHandle
+        for pad in self.config["pads"]:
             wav_path = self._samples_dir / pad["wav"]
-            base_ch = i * CHANNELS_PER_PAD
-            self._pad_channels[pad["cc"]] = [
-                pygame.mixer.Channel(base_ch + j) for j in range(CHANNELS_PER_PAD)
-            ]
-            self._pad_chan_idx[pad["cc"]] = 0
             if wav_path.exists():
-                try:
-                    sound = pygame.mixer.Sound(str(wav_path))
-                    sound.set_volume(self.config.get("volume", 0.75))
-                    self._sfx[pad["cc"]] = sound
-                except pygame.error as e:
-                    print(f"[PadSentry] 加载 {wav_path.name} 失败: {e}")
+                sfx = audio.load(str(wav_path))
+                if sfx is not None:
+                    self._sfx[pad["cc"]] = sfx
+                    self.log.info("loaded %s (%.2fs)", wav_path.name, sfx.duration)
+                else:
+                    self.log.warning("load failed: %s", wav_path.name)
 
-        # 订阅 MIDI 消息总线
-        app.subscribe("midi.message", self._on_message)
+        # ---- 订阅细分 topic（宿主已按 type 过滤，直接拿到 cc 类型消息）----
+        app.subscribe("midi.cc", self._on_cc)
 
     def on_deactivate(self):
-        for s in self._sfx.values():
-            s.stop()
+        for sfx in self._sfx.values():
+            sfx.stop()
         self._sfx.clear()
-        # 不 quit mixer——可能其他 PyQt 部件也在用
+        if self.app:
+            self.app.audio.release_pool("pad_sentry")
 
     # ---- 消息处理 ----
-    def _on_message(self, parsed):
-        """EventBus 回调：每条 MIDI 消息进来一次。
+    def _on_cc(self, parsed):
+        """EventBus 回调：宿主已按 topic=midi.cc 过滤，进来的都是 CC 消息。
 
-        只响应 cc 类型 + cc 号在我们监听范围内 + value > 0（松开忽略）。
+        只响应 value > 0（松开忽略）+ cc 号在 pad_map 范围内的。
         """
-        if parsed.type != "cc":
-            return
         cc = parsed.values.get("control")
         val = parsed.values.get("value", 0)
         if cc not in self._pad_map:
@@ -264,16 +248,14 @@ class PadSentry(Plugin):
         if pad_btn is not None:
             pad_btn.pulse(self.config.get("pad_pulse_ms", 300))
 
-        # 音频：round-robin 选 channel 播放
+        # 音频：交给宿主统一服务 round-robin 播放
         if self.config.get("enabled", True):
             sfx = self._sfx.get(cc)
             if sfx is not None:
-                sfx.set_volume(self.config.get("volume", 0.75))
-                channels = self._pad_channels[cc]
-                idx = self._pad_chan_idx[cc]
-                self._pad_chan_idx[cc] = (idx + 1) % len(channels)
-                # Channel.play() 永不返回 None；忙则打断最老的
-                channels[idx].play(sfx)
+                volume = self.config.get("volume", 0.75)
+                self.app.audio.play(
+                    sfx, plugin_name="pad_sentry", volume=volume
+                )
 
     # ---- UI ----
     def create_panel(self) -> QWidget:

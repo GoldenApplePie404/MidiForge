@@ -36,6 +36,7 @@ from core.audio import _AudioService
 from core.clock import _Clock
 from core.events import EventBus
 from core.matcher import Matcher
+from core.midi_file import _MidiFileService
 from midi.engine import MidiEngine
 from midi.parser import ParsedMessage
 
@@ -240,6 +241,7 @@ class AppContext:
     bindings: _BindingRuntime = field(default=None, repr=False)  # type: ignore[assignment]
     audio: _AudioService = field(default=None, repr=False)    # type: ignore[assignment]
     clock: _Clock = field(default=None, repr=False)           # type: ignore[assignment]
+    midi_file: _MidiFileService = field(default=None, repr=False)  # type: ignore[assignment]
 
     # ---- 运行时内部 ----
     _thread: Optional[threading.Thread] = field(default=None, repr=False)
@@ -253,6 +255,7 @@ class AppContext:
         self.bindings = _BindingRuntime(self)
         self.audio = _AudioService()
         self.clock = _Clock(bus=self.bus)
+        self.midi_file = _MidiFileService()
 
     # ---- 事件订阅 ----
 
