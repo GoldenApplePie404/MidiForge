@@ -6,28 +6,27 @@ REM  MidiForge - One-click launcher
 REM  (First run: create venv and install deps)
 REM ============================================
 
-REM ---- Step 0: Python 自检 ----
+REM ---- Step 0: Python check ----
 echo [Check] Looking for Python...
 
 where python >nul 2>&1
 if errorlevel 1 (
     echo.
-    echo [ERROR] 没找到 Python！
+    echo [ERROR] Python not found!
     echo.
-    echo 请先安装 Python 3.11 或更高版本:
+    echo Please install Python 3.11 or higher:
     echo   https://www.python.org/downloads/windows/
     echo.
-    echo ★ 安装时务必勾选 "Add Python to PATH" ★
+    echo IMPORTANT: check "Add Python to PATH" during installation
     echo.
     pause
     exit /b 1
 )
 
-REM 检查版本 >= 3.11
-for /f "tokens=*" %%v in ('python --version 2^>^&1') do set PYVER=%%v
-echo [Check] Found %PYVER%
-for /f "tokens=2 delims= " %%m in ('python --version 2^>^&1') do set PYMAJOR=%%m
-for /f "tokens=1,2 delims=." %%a in ("%PYMAJOR%") do (
+REM Check version >= 3.11
+for /f "tokens=2 delims= " %%m in ('python --version 2^>^&1') do set PYVER=%%m
+echo [Check] Found Python %PYVER%
+for /f "tokens=1,2 delims=." %%a in ("%PYVER%") do (
     set /a MAJ=%%a
     set /a MIN=%%b
 )
@@ -37,22 +36,22 @@ goto :py_ok
 
 :py_too_old
 echo.
-echo [ERROR] Python 版本过低（%PYMAJOR%）。需要 3.11+。
-echo 下载: https://www.python.org/downloads/windows/
+echo [ERROR] Python %PYVER% is too old. Need 3.11+.
+echo Download: https://www.python.org/downloads/windows/
 echo.
 pause
 exit /b 1
 
 :py_ok
 
-REM ---- Step 1: venv + 依赖 ----
+REM ---- Step 1: venv + deps ----
 if not exist ".venv\Scripts\python.exe" (
     echo.
     echo [First run] Virtual env not found, creating...
     python -m venv .venv
     if errorlevel 1 goto :fail
 
-    echo [First run] Installing dependencies, this may take a few minutes...
+    echo [First run] Installing dependencies (this may take a few minutes)...
     ".venv\Scripts\python.exe" -m pip install --upgrade pip
     ".venv\Scripts\python.exe" -m pip install -r requirements.txt
     if errorlevel 1 goto :fail
@@ -74,6 +73,6 @@ exit /b 0
 
 :fail
 echo.
-echo [Error] Launch failed, check the messages above.
+echo [Error] Launch failed. Check messages above.
 pause
 exit /b 1
