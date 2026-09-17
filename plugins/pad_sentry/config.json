@@ -1,0 +1,51 @@
+{
+  "cc_range": [
+    102,
+    109
+  ],
+  "volume": 0.37,
+  "enabled": true,
+  "pad_pulse_ms": 300,
+  "pads": [
+    {
+      "cc": 102,
+      "name": "节奏镲",
+      "wav": "707 Ride.wav"
+    },
+    {
+      "cc": 103,
+      "name": "通鼓(左)",
+      "wav": "Tom 1 HQ Rock #8.wav"
+    },
+    {
+      "cc": 104,
+      "name": "通鼓(右)",
+      "wav": "Tom 2 HQ Rock #8.wav"
+    },
+    {
+      "cc": 105,
+      "name": "吊镲",
+      "wav": "707 Crash.wav"
+    },
+    {
+      "cc": 106,
+      "name": "闭镲",
+      "wav": "707 CH.wav"
+    },
+    {
+      "cc": 107,
+      "name": "开镲",
+      "wav": "707 OH.wav"
+    },
+    {
+      "cc": 108,
+      "name": "军鼓",
+      "wav": "Snare Hit HQ Rock #8.wav"
+    },
+    {
+      "cc": 109,
+      "name": "底鼓",
+      "wav": "GSReal Kick.wav"
+    }
+  ]
+}
