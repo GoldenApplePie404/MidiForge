@@ -1,4 +1,4 @@
-from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
+﻿from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QMainWindow, QSplitter, QStatusBar, QTabWidget, QVBoxLayout, QWidget
 
@@ -30,7 +30,7 @@ class _UiBridge(QObject):
 class MainWindow(QMainWindow):
     def __init__(self, app: "api.AppContext", plugins_dirs: list, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("MIDI 调试工具")
+        self.setWindowTitle("MidiForge")
         self.resize(1080, 720)
         self.app = app
 

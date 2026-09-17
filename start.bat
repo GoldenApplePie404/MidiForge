@@ -1,8 +1,8 @@
-@echo off
+﻿@echo off
 cd /d "%~dp0"
 
 REM ============================================
-REM  MIDI Debug Tool - One-click launcher
+REM  MidiForge - One-click launcher
 REM  (First run: create venv and install deps)
 REM ============================================
 
@@ -19,7 +19,7 @@ if not exist ".venv\Scripts\python.exe" (
     echo [OK] Dependencies installed.
 )
 
-echo [Start] Launching MIDI Debug Tool...
+echo [Start] Launching MidiForge...
 ".venv\Scripts\python.exe" app.py
 if errorlevel 1 goto :fail
 

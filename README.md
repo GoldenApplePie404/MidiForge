@@ -1,4 +1,4 @@
-# MIDI 调试工具
+# MidiForge
 
 一个 Windows 平台的双向 MIDI 监控、信号绑定与虚拟端口调试工具。
 
