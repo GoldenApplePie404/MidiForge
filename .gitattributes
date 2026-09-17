@@ -1,0 +1,7 @@
+﻿# Force CRLF for Windows batch files
+*.bat    text eol=crlf
+*.cmd    text eol=crlf
+# Python / config / md: let git do its thing
+*.py     text eol=lf
+*.json   text eol=lf
+*.md     text eol=lf
