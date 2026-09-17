@@ -12,6 +12,12 @@
 
 ## 快速开始
 
+### 前置条件
+
+- **Python 3.11 或更高**（3.11 / 3.12 / 3.13 都行）
+- 下载地址：https://www.python.org/downloads/windows/
+- ⚠️ 安装时**务必勾选 "Add Python to PATH"**
+
 ### 方式一：一键启动（推荐）
 
 双击 `start.bat`，首次运行会自动创建虚拟环境并安装依赖。
@@ -87,8 +93,11 @@ python -m venv .venv
 
 - **新增 / 删除**：行级操作
 - **导入 / 导出 JSON**：方便跨设备同步
+- **批量删除**：勾选左侧 checkbox 后点删除按钮
 
-配置文件保存在 `config/bindings.json`（首次运行自动创建，损坏文件自动备份）。
+配置文件保存在 `config/bindings.json`（首次运行自动创建空模板，损坏文件自动备份）。
+
+> ⚠️ **拿到 clone 后绑定是空的**。`config/bindings.json` 被 gitignore 排除，里面没有任何预置绑定——这是故意的，因为每条绑定都绑定了特定的硬件 CC 号和键盘位。导入你的硬件专用配置（如项目自带的 `fl.json`）或在 UI 里手动新建。
 
 ### PadSentry 打击垫插件
 
@@ -338,46 +347,4 @@ python -m pytest tests/test_virtual_port.py -v
 回环测试需要真实虚拟端口（loopMIDI）存在，否则自动跳过。
 
 ---
-
-## 开发路线图
-
-- [x] 绑定触发主线接通（Matcher → 虚拟 MIDI 转发 / 键盘模拟 / 自定义回调）
-- [x] 插件 Tab 自动渲染 `create_panel()` 面板
-- [x] 打击垫插件 PadSentry：2×4 可视化 + pygame 音频 + Ogg-in-WAV 解包
-- [x] 绑定导入 JSON 后不生效 bug（原地更新配置对象）
-- [x] 绑定列表 checkbox 批量选择 + 批量删除
-- [ ] 日志过滤 UI（类型下拉、通道过滤）
-- [ ] MIDI 文件导入播放 / 录制导出
-- [ ] 信号示波器（力度曲线 / CC 曲线）
-- [ ] 命令行模式（`python app.py --port CYD-MIDI --log`）
-- [ ] 自动绑定学习（监听最近一条 MIDI 生成绑定）
-
----
-
-## Changelog
-
-### v0.2 — 2026-09-17
-
-**新增**
-
-- **PadSentry 打击垫插件**（`plugins/pad_sentry/`）：2×4 可视化网格，监听 CC 102–109，pygame.mixer 音频播放
-- **每 pad 4 channel round-robin 池**：彻底解决快速连打 / 多 pad 同时触发丢音
-- **Ogg Vorbis 嵌 WAV 格式自动解包**：FL Studio Edison 导出的 0x674F format tag 文件，从 data chunk 抽出 OGG 流再转 PCM
-- 绑定列表 **checkbox 多选 + 批量删除**
-- 键盘绑定 key_out 分支（`ctrl+c` / `f1` 等全局按键模拟）
-- `requirements-dev.txt` 开发依赖文件
-
-**修复**
-
-- **绑定 JSON 导入后不触发**：`_import()` 替换了 `self._config` 对象，但 `matcher._config` / `app.config` 仍持旧引用 → 改为原地更新 bindings 列表
-- **`requirements.txt` 格式损坏**：`keyboard>=0.13.5pygame>=2.5` 粘在一行 → 分两行
-- pygame mixer channel 数不足（原 8 条全局共享）→ 32 条（8 pad × 4 独占）
-- `_ensure_samples` 自动合成采样会覆盖用户原始文件 → 改为 skip_existing + 手动 ffmpeg 解包
-- 路径名含空格 / `#`（如 `Snare Hit HQ Rock #8.wav`）ffmpeg 转码参数报错
-
-**基础设施**
-
-- `.gitignore` 更新：排除 `_diag*.py`、`.pytest_cache/`、`docs/superpowers/`、`samples_backup/`、`*.log`、IDE 配置目录
-- `启动MIDI调试工具.bat` → `start.bat` 重命名
-- 78 pytest 测试全部通过
 
