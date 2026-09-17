@@ -3,8 +3,15 @@
 架构见 docs/superpowers/specs/2026-09-17-midi-practice-design.md
 """
 import json
+import sys
 import time
 from pathlib import Path
+
+# ⚠️ 必须在 import 自己包内的模块之前加 — 宿主用 spec_from_file_location 加载，
+# 不会自动把插件父目录放进 sys.path，导致 from midi_practice.engine import ... 找不到。
+_PLUGINS_PARENT = Path(__file__).resolve().parent.parent
+if str(_PLUGINS_PARENT) not in sys.path:
+    sys.path.insert(0, str(_PLUGINS_PARENT))
 from typing import List, Optional
 
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal
