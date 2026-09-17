@@ -284,6 +284,13 @@ midi/
 }
 ```
 
+### 项目自带的定制化配置
+
+以下文件属于**针对特定硬件/软件的个性化定制**，作为项目随仓库保存，不属于 MidiForge 通用配置：
+
+- `fl.json` — 针对作者的 **KL Essential 61 mk3 MIDI 键盘 + FL Studio 20** 整理的播放键位绑定（play/stop/rec/cycle/next bar 等）。换用其他 DAW 或键盘后需自行重建。
+- `plugins/pad_sentry/config.json` — 打击垫插件的 pad → 采样映射（8 个 pad 的 CC 号、显示名、wav 文件名）。
+
 ### 虚拟端口检测策略
 
 按优先级尝试：
