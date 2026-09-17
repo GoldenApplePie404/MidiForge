@@ -14,7 +14,7 @@
 
 ### 方式一：一键启动（推荐）
 
-双击 `启动MIDI调试工具.bat`，首次运行会自动创建虚拟环境并安装依赖。
+双击 `start.bat`，首次运行会自动创建虚拟环境并安装依赖。
 
 ### 方式二：手动启动
 
@@ -45,7 +45,8 @@ python -m venv .venv
 | python-rtmidi | ≥1.5.8 | 跨平台 MIDI I/O |
 | PyQt6 | ≥6.7.0 | GUI 框架 |
 | keyboard | ≥0.13.5 | 全局键盘监听 |
-| pytest | — | 开发依赖，测试框架 |
+| pygame | ≥2.5 | 打击垫插件音频播放 |
+| pytest / pytest-qt | — | 开发依赖，测试框架 |
 
 ---
 
@@ -88,6 +89,20 @@ python -m venv .venv
 - **导入 / 导出 JSON**：方便跨设备同步
 
 配置文件保存在 `config/bindings.json`（首次运行自动创建，损坏文件自动备份）。
+
+### PadSentry 打击垫插件
+
+2×4 可视化打击垫，监听 MIDI CC 102–109（对应多数 61 键键盘打击垫），踩 pad 时格子发光 + 播放鼓组采样。
+
+**音频特性：**
+
+- 每 pad 独占 4 条 pygame channel，round-robin 轮换播放，**连打 / 同时踩永不丢音**
+- 支持 FL Studio Edison 导出的 **Ogg Vorbis 嵌 WAV 格式**（format tag 0x674F），自动解包转 PCM
+- 用户原始采样安全：解包前自动备份到 `samples_backup/` 目录，gitignore 排除不上传
+
+**自定义采样：**
+
+把 wav 丢进 `plugins/pad_sentry/samples/`，改 `plugins/pad_sentry/config.json` 的 `wav` 字段指向新文件名即可。
 
 ---
 
@@ -182,7 +197,7 @@ class NoteSentry(Plugin):
 midi/
 ├── app.py                        # GUI 入口
 ├── api.py                        # SDK：AppContext + 事件总线装饰器
-├── 启动MIDI调试工具.bat           # Windows 一键启动
+├── start.bat           # Windows 一键启动
 ├── requirements.txt              # 运行依赖
 ├── requirements-dev.txt          # 开发依赖（含 pytest + pytest-qt）
 │
@@ -294,7 +309,7 @@ Windows rtmidi 自动附加的索引号后缀会被自动剔除再比较。
 
 ### 程序一闪而过
 
-使用 `启动MIDI调试工具.bat`，它自带 `pause` 并在首次运行时自动安装依赖。手动运行时观察控制台错误输出。
+使用 `start.bat`，它自带 `pause` 并在首次运行时自动安装依赖。手动运行时观察控制台错误输出。
 
 ---
 
@@ -319,10 +334,43 @@ python -m pytest tests/test_virtual_port.py -v
 
 ## 开发路线图
 
-- [ ] 绑定触发主线接通（Matcher → 虚拟 MIDI 转发 / 键盘模拟 / 自定义回调）
-- [ ] 插件 Tab 自动渲染 `create_panel()` 面板
+- [x] 绑定触发主线接通（Matcher → 虚拟 MIDI 转发 / 键盘模拟 / 自定义回调）
+- [x] 插件 Tab 自动渲染 `create_panel()` 面板
+- [x] 打击垫插件 PadSentry：2×4 可视化 + pygame 音频 + Ogg-in-WAV 解包
+- [x] 绑定导入 JSON 后不生效 bug（原地更新配置对象）
+- [x] 绑定列表 checkbox 批量选择 + 批量删除
 - [ ] 日志过滤 UI（类型下拉、通道过滤）
 - [ ] MIDI 文件导入播放 / 录制导出
 - [ ] 信号示波器（力度曲线 / CC 曲线）
 - [ ] 命令行模式（`python app.py --port CYD-MIDI --log`）
 - [ ] 自动绑定学习（监听最近一条 MIDI 生成绑定）
+
+---
+
+## Changelog
+
+### v0.2 — 2026-09-17
+
+**新增**
+
+- **PadSentry 打击垫插件**（`plugins/pad_sentry/`）：2×4 可视化网格，监听 CC 102–109，pygame.mixer 音频播放
+- **每 pad 4 channel round-robin 池**：彻底解决快速连打 / 多 pad 同时触发丢音
+- **Ogg Vorbis 嵌 WAV 格式自动解包**：FL Studio Edison 导出的 0x674F format tag 文件，从 data chunk 抽出 OGG 流再转 PCM
+- 绑定列表 **checkbox 多选 + 批量删除**
+- 键盘绑定 key_out 分支（`ctrl+c` / `f1` 等全局按键模拟）
+- `requirements-dev.txt` 开发依赖文件
+
+**修复**
+
+- **绑定 JSON 导入后不触发**：`_import()` 替换了 `self._config` 对象，但 `matcher._config` / `app.config` 仍持旧引用 → 改为原地更新 bindings 列表
+- **`requirements.txt` 格式损坏**：`keyboard>=0.13.5pygame>=2.5` 粘在一行 → 分两行
+- pygame mixer channel 数不足（原 8 条全局共享）→ 32 条（8 pad × 4 独占）
+- `_ensure_samples` 自动合成采样会覆盖用户原始文件 → 改为 skip_existing + 手动 ffmpeg 解包
+- 路径名含空格 / `#`（如 `Snare Hit HQ Rock #8.wav`）ffmpeg 转码参数报错
+
+**基础设施**
+
+- `.gitignore` 更新：排除 `_diag*.py`、`.pytest_cache/`、`docs/superpowers/`、`samples_backup/`、`*.log`、IDE 配置目录
+- `启动MIDI调试工具.bat` → `start.bat` 重命名
+- 78 pytest 测试全部通过
+
