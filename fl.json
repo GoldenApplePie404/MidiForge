@@ -1,0 +1,170 @@
+{
+  "version": 1,
+  "bindings": [
+    {
+      "signal": "播放",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 21,
+          "value_min": 100
+        }
+      ],
+      "key_out": {
+        "key": "space"
+      }
+    },
+    {
+      "signal": "暂停",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 20,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "space"
+      }
+    },
+    {
+      "signal": "录制",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 22,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "shift+r"
+      }
+    },
+    {
+      "signal": "TAP",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 23,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "ctrl+f5"
+      }
+    },
+    {
+      "signal": "节拍器",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 27,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "ctrl+m"
+      }
+    },
+    {
+      "signal": "playlist",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 24,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "f5"
+      }
+    },
+    {
+      "signal": "piano_roll",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 25,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "f7"
+      }
+    },
+    {
+      "signal": "channel_rack",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 26,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "f6"
+      }
+    },
+    {
+      "signal": "保存",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 40,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "ctrl+s"
+      }
+    },
+    {
+      "signal": "撤销",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 42,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "ctrl+z"
+      }
+    },
+    {
+      "signal": "调音台",
+      "sources": [
+        {
+          "type": "midi",
+          "channel": 0,
+          "event": "cc",
+          "cc": 41,
+          "value_min": 64
+        }
+      ],
+      "key_out": {
+        "key": "f9"
+      }
+    }
+  ]
+}
