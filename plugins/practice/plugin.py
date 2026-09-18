@@ -689,7 +689,7 @@ class PracticePlugin(Plugin):
         ctrl.addSpacing(8)
         ctrl.addWidget(QLabel("谱面:"))
         self._combo_score = QComboBox()
-        self._combo_score.addItems(["🎼 五线谱", "🔢 简谱"])
+        self._combo_score.addItems(["五线谱", "简谱"])
         self._combo_score.setFixedWidth(92)
         self._combo_score.currentIndexChanged.connect(self._on_score_mode_changed)
         ctrl.addWidget(self._combo_score)
@@ -715,23 +715,23 @@ class PracticePlugin(Plugin):
 
         ctrl.addStretch()
 
-        self._btn_import = QPushButton("📂 导入 MIDI")
+        self._btn_import = QPushButton("导入 MIDI")
         self._btn_import.setMinimumHeight(28)
         self._btn_import.clicked.connect(self._on_import_midi)
         ctrl.addWidget(self._btn_import)
 
-        self._btn_start = QPushButton("▶ 开始")
+        self._btn_start = QPushButton("开始")
         self._btn_start.setMinimumHeight(28)
         self._btn_start.clicked.connect(self._on_start)
         ctrl.addWidget(self._btn_start)
 
-        self._btn_pause = QPushButton("⏸ 暂停")
+        self._btn_pause = QPushButton("暂停")
         self._btn_pause.setMinimumHeight(28)
         self._btn_pause.setEnabled(False)
         self._btn_pause.clicked.connect(self._on_pause)
         ctrl.addWidget(self._btn_pause)
 
-        self._btn_reset = QPushButton("🔄 重置")
+        self._btn_reset = QPushButton("重置")
         self._btn_reset.setMinimumHeight(28)
         self._btn_reset.clicked.connect(self._on_reset)
         ctrl.addWidget(self._btn_reset)
@@ -774,7 +774,7 @@ class PracticePlugin(Plugin):
         layout.addWidget(self._splitter, 1)
 
         # 简化状态栏
-        self._stats = QLabel('🎵 选择练习 → 导入 MIDI 或选 demo → ▶ 开始')
+        self._stats = QLabel('选择练习 → 导入 MIDI 或选 demo → 点 开始')
         self._stats.setStyleSheet('color:#aaa; padding:2px 8px; font-size:12px; background:transparent;')
         self._stats.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._stats.setFixedHeight(22)
@@ -791,7 +791,7 @@ class PracticePlugin(Plugin):
         if getattr(self, "_imported_notes", None):
             # 优先用已导入的 MIDI
             notes = self._imported_notes
-            self._stats.setText(f"📂 用已导入的 {len(notes)} 个音符 @ {bpm:.0f} BPM → 开始!")
+            self._stats.setText(f"用已导入的 {len(notes)} 个音符 @ {bpm:.0f} BPM → 开始")
             key = getattr(self, "_imported_key", "C")
             meter = getattr(self, "_imported_meter", "4/4")
         else:
@@ -809,9 +809,9 @@ class PracticePlugin(Plugin):
         self._render_score(notes, bpm, key, meter)
         self._stats.setText("🎯 进行中... 得分: 0 | P0 G0 O0 M0")
         self._lane.start()
-        self._btn_start.setText("▶ 进行中…")
+        self._btn_start.setText("进行中")
         self._btn_start.setEnabled(False)
-        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setText("暂停")
         self._btn_pause.setEnabled(True)
         self._follow_timer.start()
 
@@ -837,24 +837,24 @@ class PracticePlugin(Plugin):
             return
         if self._lane.paused:
             self._lane.resume()
-            self._btn_pause.setText("⏸ 暂停")
-            self._btn_start.setText("▶ 进行中…")
+            self._btn_pause.setText("暂停")
+            self._btn_start.setText("进行中")
             self._follow_timer.start()
         else:
             self._lane.pause()
-            self._btn_pause.setText("▶ 继续")
-            self._btn_start.setText("⏸ 已暂停")
+            self._btn_pause.setText("继续")
+            self._btn_start.setText("已暂停")
             self._follow_timer.stop()
-            self._stats.setText("⏸ 已暂停 — 点「继续」回到演奏")
+            self._stats.setText("已暂停 — 点「继续」回到演奏")
 
     def _on_reset(self):
         if not self._lane:
             return
         self._lane.stop()
         self._lane.reset()
-        self._btn_start.setText("▶ 开始")
+        self._btn_start.setText("开始")
         self._btn_start.setEnabled(True)
-        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setText("暂停")
         self._btn_pause.setEnabled(False)
         self._stats.setText("已重置 — 选择练习 → 点开始")
         self._clear_vex_highlight()
@@ -881,9 +881,9 @@ class PracticePlugin(Plugin):
         h = self._lane._hits
         total = sum(h.values())
         score = (h["perfect"] * 100 + h["good"] * 80 + h["ok"] * 50) / max(total, 1)
-        self._btn_start.setText("▶ 开始")
+        self._btn_start.setText("开始")
         self._btn_start.setEnabled(True)
-        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setText("暂停")
         self._btn_pause.setEnabled(False)
         self._follow_timer.stop()
         self._stats.setText(f"✅ 练习结束！总分 {score:.0f}/100 — P{h['perfect']} G{h['good']} O{h['ok']} M{h['miss']}")
@@ -1002,7 +1002,7 @@ class PracticePlugin(Plugin):
         self._render_score(notes, bpm, key, meter, tracks)
         n_tracks = len(dict.fromkeys(tracks)) if tracks else 1
         self._stats.setText(
-            f"📂 已导入 {len(notes)} 个音符 / {n_tracks} 轨道 @ {bpm:.0f} BPM — 点 ▶ 开始")
+            f"已导入 {len(notes)} 个音符 / {n_tracks} 轨道 @ {bpm:.0f} BPM — 点 开始")
 
     def _render_score(self, notes, bpm, key="C", meter="4/4", tracks=None):
         """把练习音符喂给 VexFlow 谱面（含 time 用于小节切分、track 分行）。"""

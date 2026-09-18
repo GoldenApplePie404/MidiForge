@@ -7,7 +7,7 @@
     view.page().runJavaScript("render({notes: [...]});")
 
 JS 全局函数：
-  render({notes: [{midi, duration, time, track}], clef, key, meter, bpm}) → 重绘全部
+  render({notes, clef, key, meter, bpm}) → 重绘全部
     - time: 音符起始绝对时间（秒），用于按小节排版
     - duration: 秒 → 内部转成拍数
     - track: 轨道名（可选）；不同轨道分谱表行渲染
@@ -16,13 +16,9 @@ JS 全局函数：
   clearHighlight()           → 清除高亮
 """
 
-# VEXFLOW_BASE_URL 让 setHtml 里的相对路径 src="vexflow.js" 指向本地文件
 import os as _os
-
-# 找到 assets/ 目录
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 _ASSETS_DIR = _os.path.join(_HERE, "assets")
-# file:/// 前缀（Windows 盘符三斜杠），base URL 必须是目录（以 / 结尾）
 _ASSETS_DIR_URL = _ASSETS_DIR.replace("\\", "/") + "/"
 _BASE_URL_STR = "file:///" + _ASSETS_DIR_URL
 
@@ -39,10 +35,8 @@ VEXFLOW_HTML = r"""<!DOCTYPE html>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { background:#16213e; color:#e0e0e0; overflow:hidden; font-family:sans-serif; }
-  .score-wrap { overflow-x:auto; overflow-y:auto; }
-  svg { display:block; min-width:100%; }
-  #treble-svg { height:auto; }
-  #jp-svg { height:auto; }
+  .score-wrap { width:100%; height:100%; overflow:auto; display:flex; flex-direction:column; justify-content:center; align-items:center; }
+  svg { display:block; width:100%; height:auto; }
   .hint { color:#666; font-size:11px; text-align:center; padding:6px; }
   ::-webkit-scrollbar { width:6px; height:6px; }
   ::-webkit-scrollbar-track { background:#1a1a2e; }
@@ -56,15 +50,16 @@ VEXFLOW_HTML = r"""<!DOCTYPE html>
 <script src="vexflow.js"></script>
 <script>
 "use strict";
+
 // ===== 全局状态 =====
 let _state = { notes: [], clef: 'treble', key: 'C', meter: '4/4', bpm: 120 };
-let _mode = 'treble';           // 'treble' | 'jianpu'
+let _mode = 'treble';
 let _highlightIdx = -1;
 let _highlightColor = '#fbbf24';
 let _vfRefs = [];   // [{staveNote, svgX, noteIdx}]
 let _jpRefs = [];   // [{el, svgX, noteIdx}]
-let _followBeat = -1;           // >=0: 小节跟随模式（只渲染当前窗口）
-const FOLLOW_WINDOW = { before: 0, after: 2 };  // 当前小节 + 后 2 小节，铺满一行更好读
+let _followBeat = -1;
+const FOLLOW_WINDOW = { before: 0, after: 2 };
 const _trackPalette = ['#60a5fa', '#a78bfa', '#34d399', '#f472b6',
                        '#fbbf24', '#38bdf8', '#fb923c', '#e879f9'];
 
@@ -73,7 +68,6 @@ const { Renderer, Stave, StaveNote, GhostNote, Formatter, Voice } = Vex.Flow;
 const pitchMap = {0:'c',1:'c#',2:'d',3:'d#',4:'e',5:'f',6:'f#',7:'g',8:'g#',9:'a',10:'a#',11:'b'};
 const midiToVf = (m) => pitchMap[m % 12] + '/' + (Math.floor(m / 12) - 1);
 
-// 拍数(浮点) → VexFlow duration code + dots
 function beatsToVf(b) {
   const beats = Math.max(0.25, b);
   if (Math.abs(beats - 4.0)  < 0.05) return { dur: 'w', dots: 0 };
@@ -126,13 +120,11 @@ function chunkMeasuresFor(notes, bpm, meter) {
   return { measures, beatsPerBar };
 }
 
-// 整首曲子（所有轨道展平）的小节切分 — 只用于计算总宽度
 function chunkAll(notes, bpm, meter) {
-  const { measures } = chunkMeasuresFor(notes, bpm, meter);
-  return measures;
+  return chunkMeasuresFor(notes, bpm, meter).measures;
 }
 
-// ===== 休止符补齐：剩余拍数 → GhostNote 代码列表 =====
+// ===== 休止符补齐 =====
 const REST_DUR = { w: 4, h: 2, q: 1, 8: 0.5, 16: 0.25 };
 function restForBeats(rb) {
   const order = ['w', 'h', 'q', '8', '16'];
@@ -146,7 +138,7 @@ function restForBeats(rb) {
   return parts;
 }
 
-// 深色主题：把 VexFlow 默认黑色/深灰谱元素提亮为浅色
+// ===== 深色主题提亮 =====
 const DARK_COLORS = new Set(['black', '#000', '#000000', '#444', '#333', '#999999']);
 const LIGHT_FILL = '#dfe6f0';
 function lightenSvg(root) {
@@ -154,14 +146,11 @@ function lightenSvg(root) {
   for (const el of els) {
     for (const attr of ['fill', 'stroke']) {
       const v = el.getAttribute(attr);
-      if (v && DARK_COLORS.has(v.toLowerCase())) {
-        el.setAttribute(attr, LIGHT_FILL);
-      }
+      if (v && DARK_COLORS.has(v.toLowerCase())) el.setAttribute(attr, LIGHT_FILL);
     }
   }
 }
 
-// ===== 每轨道一行五线谱 =====
 function pickClefFor(notes) {
   if (!notes.length) return _state.clef;
   const avg = notes.reduce((s, n) => s + n.midi, 0) / notes.length;
@@ -169,7 +158,6 @@ function pickClefFor(notes) {
 }
 
 function followBarRange() {
-  // 跟随模式：返回 [barFrom, barTo]，否则 null（完整渲染）
   if (_followBeat < 0) return null;
   const beatsPerBar = parseInt(_state.meter.split('/')[0], 10) || 4;
   const curBar = Math.floor(_followBeat / beatsPerBar);
@@ -181,6 +169,25 @@ function measureInRange(bar, range) {
   return !range || (bar >= range[0] && bar <= range[1]);
 }
 
+// ===== 统一几何 —— 唯一参数 S 控制谱面真实像素大小 =====
+// S = spacing_between_lines_px：glyph 在 SVG 里的真实像素，无缩放放大
+function geom(range) {
+  const S = 6;              // VexFlow spacing_between_lines_px：4=小, 5=中, 6=中+, 8=大, 10=默认
+  const STEM = 3.5 * S;     // stem 默认长度公式
+  const STAVE_H = 4 * S;
+  const PAD_H = Math.max(3, Math.round(S));
+  const LINE_H = PAD_H + STAVE_H + STEM * 2 + Math.max(2, Math.round(S/2));
+  const colsPerLine = range ? FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after : 8;
+  const CLEF_W = Math.max(18, Math.round(28 * (S/6)));
+  // MEAS_W 算成：CLEF + cols*MEAS + right = 容器实际宽度（SVG 物理铺满，不缩放）
+  // 先拿到容器宽度；拿不到时先用占位，render 里再设
+  const wrapW = document.getElementById('wrap-tr').clientWidth || 720;
+  const rightPad = Math.max(12, Math.round(18 * (S/6)));
+  const MEAS_W = Math.max(30, Math.floor((wrapW - CLEF_W - rightPad) / colsPerLine));
+  return { S, PAD_H, MEAS_W, CLEF_W, LINE_H, colsPerLine, rightPad };
+}
+
+// ===== 五线谱渲染 =====
 function renderTreble() {
   const svg = document.getElementById('treble-svg');
   svg.innerHTML = '';
@@ -194,34 +201,33 @@ function renderTreble() {
   if (allMeasures.length === 0) return;
 
   const range = followBarRange();
-  const FOLLOW_COUNT = FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after;
-  // 逻辑尺寸（与容器无关）：跟随模式用较大的小节宽（拉伸铺满），非跟随 96px/小节折行
-  const MEAS_W = range ? 180 : 96;
-  const colsPerLine = range ? FOLLOW_COUNT : 8;
-  const LINE_H = 52, PAD_H = 24;
+  const g = geom(range);
 
-  // 先算每一轨的行数，得到总高
   const trackRows = tracks.map(tr => {
     const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
     const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
     const vis = measures.filter(m => measureInRange(m.barIdx, range));
-    return Math.max(1, Math.ceil(vis.length / colsPerLine));
+    return Math.max(1, Math.ceil(vis.length / g.colsPerLine));
   });
   const totalRows = trackRows.reduce((s, x) => s + x, 0);
-  const totalH = PAD_H + totalRows * LINE_H + 18;
-  const totalW = 55 + colsPerLine * MEAS_W + 30;
+  const totalH = g.PAD_H + totalRows * g.LINE_H + Math.round(12 * (g.S/6));
+  const wrapW = document.getElementById('wrap-tr').clientWidth || 720;
+  // 居中：SVG 宽度 = 容器 - 两侧留白，靠 margin:0 auto 居中
+  const sidePad = Math.round(wrapW * 0.06);
+  const totalW = wrapW - sidePad * 2;
 
-  // SVG 用 viewBox + width:100% 等比缩放，铺满容器任何宽度都不会截断
-  // 顺序：先让 VexFlow resize（它设置 width/height），再用 viewBox 接管缩放
   const r = new Renderer(svg, Renderer.Backends.SVG);
   r.resize(totalW, totalH);
   svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
-  svg.style.width = '100%';
-  svg.style.height = 'auto';
+  svg.style.width = totalW + 'px';
+  svg.style.height = totalH + 'px';
+  svg.style.margin = '0 auto';
   svg.removeAttribute('height');
   const ctx = r.getContext();
 
-  let yCursor = PAD_H;
+  const trackLabelFont = Math.round(9 * (g.S/10));
+
+  let yCursor = g.PAD_H;
   tracks.forEach((tr, ti) => {
     const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
     const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
@@ -230,30 +236,25 @@ function renderTreble() {
     const vis = measures.filter(m => measureInRange(m.barIdx, range));
     if (vis.length === 0) return;
 
-    // 折行：每行 colsPerLine 个小节
     const rows = [];
-    for (let s = 0; s < vis.length; s += colsPerLine) {
-      rows.push(vis.slice(s, s + colsPerLine));
-    }
+    for (let s = 0; s < vis.length; s += g.colsPerLine) rows.push(vis.slice(s, s + g.colsPerLine));
 
     rows.forEach((rowMeasures, ri) => {
       const y0 = yCursor;
       rowMeasures.forEach((bar, bi) => {
-        const x = 55 + bi * MEAS_W;
-        const st = new Stave(x, y0, MEAS_W);
-        // 每行开头重新写谱号/调号（拍号只写全曲第一行）
+        const x = g.CLEF_W + bi * g.MEAS_W;
+        const st = new Stave(x, y0, g.MEAS_W, { spacing_between_lines_px: g.S });
         if (bi === 0) {
           st.addClef(clef).addKeySignature(_state.key);
           if (ri === 0 && ti === 0) st.addTimeSignature(_state.meter);
         }
-        // 跟随模式：当前小节高亮背景带（"现在弹到这儿"）
         if (range && bar.barIdx === range[0] + FOLLOW_WINDOW.before) {
           const NS2 = 'http://www.w3.org/2000/svg';
           const rect = document.createElementNS(NS2, 'rect');
           rect.setAttribute('x', x + 2);
-          rect.setAttribute('y', y0 - 6);
-          rect.setAttribute('width', MEAS_W - 4);
-          rect.setAttribute('height', 46);
+          rect.setAttribute('y', y0 - Math.round(4 * (g.S/10)));
+          rect.setAttribute('width', g.MEAS_W - 4);
+          rect.setAttribute('height', (4 * g.S) + Math.round(8 * (g.S/6)));
           rect.setAttribute('fill', '#3b82f6');
           rect.setAttribute('opacity', '0.18');
           rect.setAttribute('rx', '4');
@@ -264,13 +265,10 @@ function renderTreble() {
         const barStart = bar.barIdx * beatsPerBar;
         const tickables = [];
         const chordToVf = new Map();
-
         const sorted = bar.chords.slice().sort((a, b) => a.startBeat - b.startBeat);
         let cursor = barStart;
         const leadingGap = sorted.length ? Math.max(0, sorted[0].startBeat - barStart) : beatsPerBar;
-        if (leadingGap > 0.09) {
-          for (const code of restForBeats(leadingGap)) tickables.push(new GhostNote({ duration: code }));
-        }
+        if (leadingGap > 0.09) for (const code of restForBeats(leadingGap)) tickables.push(new GhostNote({ duration: code }));
 
         for (const ch of sorted) {
           const { dur, dots } = beatsToVf(ch.dur);
@@ -279,18 +277,13 @@ function renderTreble() {
             duration: dur, dots: dots,
             clef: clef, auto_stem: true,
           });
-          // 高亮目标：直接用目标色绘制
-          if (ch.idx === _highlightIdx) {
-            vfN.setStyle({ fillStyle: _highlightColor, strokeStyle: _highlightColor });
-          }
+          if (ch.idx === _highlightIdx) vfN.setStyle({ fillStyle: _highlightColor, strokeStyle: _highlightColor });
           tickables.push(vfN);
           chordToVf.set(ch, vfN);
           cursor = Math.max(cursor, ch.startBeat + ch.dur);
         }
         const tailGap = Math.max(0, barStart + beatsPerBar - cursor);
-        if (tailGap > 0.09) {
-          for (const code of restForBeats(tailGap)) tickables.push(new GhostNote({ duration: code }));
-        }
+        if (tailGap > 0.09) for (const code of restForBeats(tailGap)) tickables.push(new GhostNote({ duration: code }));
 
         const voice = new Voice({ num_beats: beatsPerBar, beat_value: 4 });
         voice.setStrict(false);
@@ -298,30 +291,26 @@ function renderTreble() {
         try {
           new Formatter().joinVoices([voice]).formatToStave([voice], st);
           voice.draw(ctx, st);
-        } catch (e) {
-          console.log('bar render error:', e.message || e);
-        }
+        } catch (e) { console.log('bar render error:', e.message || e); }
 
         bar.chords.forEach((ch, ci) => {
           const vfN = chordToVf.get(ch);
           if (!vfN) return;
-          const rowLocalX = x + 22 + ci * 14;
-          _vfRefs.push({ staveNote: vfN, svgX: rowLocalX,
+          _vfRefs.push({ staveNote: vfN, svgX: x + Math.round(22 * (g.S/10)) + ci * Math.round(14 * (g.S/10)),
                          noteIdx: ch.idx, track: tr, line: yi(ri, ti, trackRows) });
         });
       });
-      // 轨道标签：只在本轨第一行左侧
       if (ri === 0) {
         ctx.save();
-        ctx.setFont('sans-serif', 9);
+        ctx.setFont('sans-serif', trackLabelFont);
         ctx.setFillStyle(_trackPalette[ti % _trackPalette.length]);
-        ctx.fillText(tr.length > 6 ? tr.slice(0, 6) + '…' : tr, 2, y0 + 14);
+        ctx.fillText(tr.length > 6 ? tr.slice(0, 6) + '…' : tr, 2, y0 + Math.round(14 * (g.S/10)));
         ctx.restore();
       }
-      yCursor += LINE_H;
+      yCursor += g.LINE_H;
     });
   });
-  lightenSvg(svg);   // 黑色 → 浅色（深色主题）
+  lightenSvg(svg);
 }
 
 function yi(ri, ti, trackRows) {
@@ -330,7 +319,7 @@ function yi(ri, ti, trackRows) {
   return line + ri;
 }
 
-// ===== 每轨道一行简谱 =====
+// ===== 简谱渲染 =====
 function renderJianpu() {
   const svg = document.getElementById('jp-svg');
   svg.innerHTML = '';
@@ -345,28 +334,32 @@ function renderJianpu() {
 
   const NS = 'http://www.w3.org/2000/svg';
   const range = followBarRange();
-  const FOLLOW_COUNT = FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after;
-  const MEAS_W = range ? 180 : 96;
-  const colsPerLine = range ? FOLLOW_COUNT : 8;
-  const LINE_H = 42, PAD_H = 20;
+  const g = geom(range);
+  const jpMap = {0:'1',1:'#1',2:'2',3:'#2',4:'3',5:'4',6:'#4',7:'5',8:'#5',9:'6',10:'#6',11:'7'};
 
   const trackRows = tracks.map(tr => {
     const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
     const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
     const vis = measures.filter(m => measureInRange(m.barIdx, range));
-    return Math.max(1, Math.ceil(vis.length / colsPerLine));
+    return Math.max(1, Math.ceil(vis.length / g.colsPerLine));
   });
   const totalRows = trackRows.reduce((s, x) => s + x, 0);
-  const totalH = PAD_H + totalRows * LINE_H + 12;
-  const totalW = 55 + colsPerLine * MEAS_W + 30;
+  const totalH = g.PAD_H + totalRows * g.LINE_H + Math.round(10 * (g.S/6));
+  const wrapW = document.getElementById('wrap-jp').clientWidth || 720;
+  const sidePad = Math.round(wrapW * 0.06);
+  const totalW = wrapW - sidePad * 2;
+
   svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
-  svg.style.width = '100%';
-  svg.style.height = 'auto';
+  svg.style.width = totalW + 'px';
+  svg.style.height = totalH + 'px';
+  svg.style.margin = '0 auto';
   svg.removeAttribute('height');
 
-  const jpMap = {0:'1',1:'#1',2:'2',3:'#2',4:'3',5:'4',6:'#4',7:'5',8:'#5',9:'6',10:'#6',11:'7'};
+  const jpFont = Math.round(22 * (g.S/10));
+  const jpLineH = g.LINE_H;
+  const trackLabelFont = Math.round(9 * (g.S/10));
 
-  let yCursor = PAD_H;
+  let yCursor = g.PAD_H;
   tracks.forEach((tr, ti) => {
     const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
     const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
@@ -375,44 +368,42 @@ function renderJianpu() {
     if (vis.length === 0) return;
 
     const rows = [];
-    for (let s = 0; s < vis.length; s += colsPerLine) {
-      rows.push(vis.slice(s, s + colsPerLine));
-    }
+    for (let s = 0; s < vis.length; s += g.colsPerLine) rows.push(vis.slice(s, s + g.colsPerLine));
+
     rows.forEach((rowMeasures, ri) => {
       const lineY = yCursor;
-      const baseY = lineY + 20;
+      const baseY = lineY + Math.round(22 * (g.S/10));
       rowMeasures.forEach((bar, bi) => {
-        const x0 = 55 + bi * MEAS_W + 8;
         const barStart = bar.barIdx * beatsPerBar;
-        const lx = 55 + bi * MEAS_W - 2;
-        addLine(svg, NS, lx, lineY, lx, lineY + 40, '#3a3a5e', 1.5);
-        // 轨道名：只在本轨第一行
+        const lx = g.CLEF_W + bi * g.MEAS_W - Math.round(2 * (g.S/10));
+        addLine(svg, NS, lx, lineY, lx, lineY + jpLineH, '#3a3a5e', Math.round(1.5 * (g.S/10)));
         if (bi === 0 && ri === 0) {
-          const t = addText(svg, NS, 4, baseY, tr.length > 5 ? tr.slice(0, 5) : tr, 0, 10, '#888');
+          const t = addText(svg, NS, 4, baseY, tr.length > 5 ? tr.slice(0, 5) : tr, 0, trackLabelFont, '#888');
           t.setAttribute('text-anchor', 'start');
         }
+        const x0 = g.CLEF_W + bi * g.MEAS_W + Math.round(6 * (g.S/10));
         for (const ch of bar.chords) {
           const localBeat = ch.startBeat - barStart;
-          const cx = x0 + localBeat * (MEAS_W - 16) / beatsPerBar;
+          const cx = x0 + localBeat * (g.MEAS_W - Math.round(14 * (g.S/10))) / beatsPerBar;
           const sortedMidis = ch.midis.slice().sort((a, b) => a - b);
+          const noteStep = Math.round(14 * (g.S/10));
           sortedMidis.forEach((midi, ki) => {
             const digit = jpMap[midi % 12] || '?';
-            const oct = Math.floor(midi / 12) - 5;      // C4(60) → 0
-            const y = baseY - (sortedMidis.length - 1 - ki) * 16;
-            const el = addText(svg, NS, cx, y, digit, oct, 22);
+            const oct = Math.floor(midi / 12) - 5;
+            const y = baseY - (sortedMidis.length - 1 - ki) * noteStep;
+            const el = addText(svg, NS, cx, y, digit, oct, jpFont);
             el.dataset.idx = ch.idx;
             el.classList.add('jp-note');
             const durBeats = ch.dur;
-            if (durBeats < 0.4) addUnderline(svg, NS, cx, y + 8, 2);
-            else if (durBeats < 0.8) addUnderline(svg, NS, cx, y + 8, 1);
-            if (durBeats >= 1.9) addDash(svg, NS, cx, y, 1);
-            if (durBeats >= 3.9) addDash(svg, NS, cx + 14, y, 1);
+            const uY = y + Math.round(8 * (g.S/10));
+            if (durBeats < 0.4) addUnderline(svg, NS, cx, uY, 2, (g.S/10));
+            else if (durBeats < 0.8) addUnderline(svg, NS, cx, uY, 1, (g.S/10));
             _jpRefs.push({ el, svgX: cx, svgY: lineY, noteIdx: ch.idx, track: tr,
                            line: yi(ri, ti, trackRows) });
           });
         }
       });
-      yCursor += LINE_H;
+      yCursor += jpLineH;
     });
   });
   if (_highlightIdx >= 0) applyJpHighlight();
@@ -430,41 +421,36 @@ function addText(svg, NS, x, y, digit, oct, size, color) {
   t.setAttribute('font-weight', 'bold');
   t.textContent = digit;
   g.appendChild(t);
+  const r = Math.max(1.6, Math.round(size * 0.14));
+  const octStep = Math.max(4, Math.round(size * 0.28));
   if (oct > 0) {
     for (let d = 0; d < oct; d++) {
       const c = document.createElementNS(NS, 'circle');
-      c.setAttribute('cx', x); c.setAttribute('cy', y - size * 0.85 - d * 7);
-      c.setAttribute('r', 2.6); c.setAttribute('fill', color || '#e8e8e8');
+      c.setAttribute('cx', x); c.setAttribute('cy', y - size * 0.85 - d * octStep);
+      c.setAttribute('r', r); c.setAttribute('fill', color || '#e8e8e8');
       g.appendChild(c);
     }
   } else if (oct < 0) {
     for (let d = 0; d < -oct; d++) {
       const c = document.createElementNS(NS, 'circle');
-      c.setAttribute('cx', x); c.setAttribute('cy', y + size * 0.35 + d * 7);
-      c.setAttribute('r', 2.6); c.setAttribute('fill', color || '#e8e8e8');
+      c.setAttribute('cx', x); c.setAttribute('cy', y + size * 0.35 + d * octStep);
+      c.setAttribute('r', r); c.setAttribute('fill', color || '#e8e8e8');
       g.appendChild(c);
     }
   }
   svg.appendChild(g);
   return t;
 }
-function addUnderline(svg, NS, cx, y, count) {
+function addUnderline(svg, NS, cx, y, count, sc) {
+  const w = Math.max(4, Math.round(9 * sc));
+  const gap = Math.max(2, Math.round(4 * sc));
+  const sw = Math.max(1, Math.round(1.6 * sc));
   for (let i = 0; i < count; i++) {
     const l = document.createElementNS(NS, 'line');
-    l.setAttribute('x1', cx - 9); l.setAttribute('x2', cx + 9);
-    l.setAttribute('y1', y + 8 + i * 4); l.setAttribute('y2', y + 8 + i * 4);
-    l.setAttribute('stroke', '#888'); l.setAttribute('stroke-width', '1.6');
+    l.setAttribute('x1', cx - w); l.setAttribute('x2', cx + w);
+    l.setAttribute('y1', y + i * gap); l.setAttribute('y2', y + i * gap);
+    l.setAttribute('stroke', '#888'); l.setAttribute('stroke-width', sw);
     svg.appendChild(l);
-  }
-}
-function addDash(svg, NS, cx, y, n) {
-  for (let i = 0; i < n; i++) {
-    const t = document.createElementNS(NS, 'text');
-    t.setAttribute('x', cx + 12 + i * 12); t.setAttribute('y', y);
-    t.setAttribute('text-anchor', 'middle');
-    t.setAttribute('font-size', 22); t.setAttribute('fill', '#e8e8e8'); t.setAttribute('font-weight', 'bold');
-    t.textContent = '-';
-    svg.appendChild(t);
   }
 }
 function addLine(svg, NS, x1, y1, x2, y2, color, w) {
@@ -476,15 +462,13 @@ function addLine(svg, NS, x1, y1, x2, y2, color, w) {
 }
 
 // ===== 高亮 =====
-function applyVfHighlight() {
-  renderTreble();   // 原子化重绘：目标音符已 inline 目标色
-}
+function applyVfHighlight() { renderTreble(); }
 function applyJpHighlight() {
   const color = _highlightColor;
   for (const ref of _jpRefs) {
     const on = ref.noteIdx === _highlightIdx;
     ref.el.setAttribute('fill', on ? color : '#e8e8e8');
-    ref.el.setAttribute('font-size', on ? '27' : '22');
+    ref.el.setAttribute('font-size', on ? Math.round(26) : Math.round(22));
   }
   scrollToNote(ref => ref.noteIdx === _highlightIdx);
 }
@@ -496,18 +480,8 @@ function scrollToNote(matchFn) {
   const list = _mode === 'treble' ? _vfRefs : _jpRefs;
   const ref = list.find(matchFn);
   if (!ref) return;
-  const viewW = document.getElementById('wrap-tr').clientWidth || 700;
-  // 折行后需同时滚到对应行：目标 y = 行号 * 行高
-  const line = ref.line || 0;
-  const lineH = _mode === 'treble' ? 52 : 42;
-  const targetY = Math.max(0, (line + 0) * lineH - 10);
-  const wrap = document.getElementById('wrap-tr');
-  wrap.scrollTop = targetY;
-  document.getElementById('wrap-jp').scrollTop = targetY;
-  // 水平居中（行内 svgX）
-  const targetX = Math.max(0, ref.svgX - viewW / 2 + 60);
-  wrap.scrollLeft = targetX;
-  document.getElementById('wrap-jp').scrollLeft = targetX;
+  const wrap = _mode === 'treble' ? document.getElementById('wrap-tr') : document.getElementById('wrap-jp');
+  wrap.scrollTop = Math.max(0, ref.line * (Math.round(52 * 0.6)) - 10);
 }
 
 // ===== 模式切换 =====
@@ -516,11 +490,9 @@ function setMode(mode) {
   const showTr = _mode === 'treble';
   document.getElementById('wrap-tr').style.display = showTr ? 'block' : 'none';
   document.getElementById('wrap-jp').style.display = showTr ? 'none' : 'block';
-  // 渲染当前模式
   if (_state.notes.length > 0) {
     if (showTr) renderTreble(); else renderJianpu();
   }
-  // 布局稳定后再渲染一次（clientWidth 此时才可靠）
   requestAnimationFrame(() => {
     if (_state.notes.length > 0) {
       if (showTr) renderTreble(); else renderJianpu();
@@ -528,16 +500,12 @@ function setMode(mode) {
   });
 }
 
-// ===== 演奏跟随（按小节切分显示 + 自动跳转）=====
+// ===== 演奏跟随 =====
 function setFollow(beat) {
   _followBeat = beat;
   if (_state.notes.length > 0) {
     if (_mode === 'treble') renderTreble(); else renderJianpu();
   }
-  // 在当前小节后滚动到窗口开头
-  const wrap = document.getElementById('wrap-tr');
-  wrap.scrollTop = 0;
-  wrap.scrollLeft = 0;
 }
 function clearFollow() {
   _followBeat = -1;
@@ -558,7 +526,7 @@ function render(data) {
   _state.meter = (data && data.meter) || '4/4';
   _state.bpm   = (data && data.bpm)   || 120;
   _highlightIdx = -1;
-  _followBeat = -1;   // 新数据 → 回到完整谱面视图
+  _followBeat = -1;
 
   if (_state.notes.length === 0) {
     const hint = document.getElementById('hint');
@@ -590,7 +558,7 @@ function clearHighlight() {
   applyHighlight();
 }
 
-// 容器尺寸变化（拖动分隔条/窗口）时重渲染，保证谱面铺满
+// 容器尺寸变化时重渲染
 (function () {
   let rszTimer = null;
   window.addEventListener('resize', function () {
