@@ -1,6 +1,7 @@
 import sys
 from pathlib import Path
 
+from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QApplication
 
 import api
@@ -24,6 +25,8 @@ def create_binding_config_path(path: Path) -> None:
 def main() -> int:
     create_binding_config_path(BINDINGS_PATH)
     app = api.create_app(bindings_path=str(BINDINGS_PATH))
+    # QtWebEngine 需要这个 flag 在 QApplication 之前设置
+    QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     qapp = QApplication(sys.argv)
     qapp.setStyleSheet(QSS.GLOBAL_QSS)
     win = MainWindow(app=app, plugins_dirs=[str(p) for p in PLUGIN_DIRS])

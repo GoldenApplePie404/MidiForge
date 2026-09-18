@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>VexFlow Test</title></head>
+<body>
+<div id="status">Loading...</div>
+<script src="vexflow.js"></script>
+<script>
+try {
+  document.getElementById('status').innerHTML = 
+    'Vex=' + typeof Vex + ' | Vex.Flow=' + typeof Vex.Flow;
+} catch(e) {
+  document.getElementById('status').innerHTML = 'FAIL: ' + e;
+}
+</script>
+</body></html>
