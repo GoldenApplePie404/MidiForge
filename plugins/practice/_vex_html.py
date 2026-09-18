@@ -7,24 +7,25 @@
     view.page().runJavaScript("render({notes: [...]});")
 
 JS 全局函数：
-  render({notes: [{midi, duration}], clef, key, meter})   → 重绘全部
-  highlightVf(index, color)                                → 高亮第 index 个音符
+  render({notes: [{midi, duration, time, track}], clef, key, meter, bpm}) → 重绘全部
+    - time: 音符起始绝对时间（秒），用于按小节排版
+    - duration: 秒 → 内部转成拍数
+    - track: 轨道名（可选）；不同轨道分谱表行渲染
+  setMode(mode)              → 'treble' 或 'jianpu'，谱子区一次只显示一种
+  highlightVf(index, color)  → 高亮第 index 个音符（当前显示模式内）
+  clearHighlight()           → 清除高亮
 """
 
 # VEXFLOW_BASE_URL 让 setHtml 里的相对路径 src="vexflow.js" 指向本地文件
 import os as _os
-import sys as _sys
 
 # 找到 assets/ 目录
 _HERE = _os.path.dirname(_os.path.abspath(__file__))
 _ASSETS_DIR = _os.path.join(_HERE, "assets")
-# QUrl 要求 file:/// 格式（注意 Windows 盘符要三斜杠）
-# base URL 必须是目录（以 / 结尾），Qt 才能正确解析 <script src="vexflow.js">
-# 取 assets 目录，不以文件名结尾
+# file:/// 前缀（Windows 盘符三斜杠），base URL 必须是目录（以 / 结尾）
 _ASSETS_DIR_URL = _ASSETS_DIR.replace("\\", "/") + "/"
 _BASE_URL_STR = "file:///" + _ASSETS_DIR_URL
 
-# 也导出一个 QUrl 方便调用
 try:
     from PyQt6.QtCore import QUrl as _QUrl
     VEXFLOW_BASE_URL = _QUrl(_BASE_URL_STR)
@@ -38,227 +39,569 @@ VEXFLOW_HTML = r"""<!DOCTYPE html>
 <style>
   * { margin:0; padding:0; box-sizing:border-box; }
   html, body { background:#16213e; color:#e0e0e0; overflow:hidden; font-family:sans-serif; }
-  #treble-svg { width:100%; height:70px; display:block; }
-  #jp-svg     { width:100%; height:90px; display:block; }
-  .hint { color:#666; font-size:11px; text-align:center; padding:4px; }
+  .score-wrap { overflow-x:auto; overflow-y:auto; }
+  svg { display:block; min-width:100%; }
+  #treble-svg { height:auto; }
+  #jp-svg { height:auto; }
+  .hint { color:#666; font-size:11px; text-align:center; padding:6px; }
+  ::-webkit-scrollbar { width:6px; height:6px; }
+  ::-webkit-scrollbar-track { background:#1a1a2e; }
+  ::-webkit-scrollbar-thumb { background:#3a3a5e; border-radius:3px; }
 </style>
 </head>
 <body>
-<svg id="treble-svg"></svg>
-<svg id="jp-svg"></svg>
+<div id="hint" class="hint">谱面加载中…</div>
+<div class="score-wrap" id="wrap-tr" style="display:none;"><svg id="treble-svg"></svg></div>
+<div class="score-wrap" id="wrap-jp" style="display:none;"><svg id="jp-svg"></svg></div>
 <script src="vexflow.js"></script>
 <script>
+"use strict";
 // ===== 全局状态 =====
-let _vfNotes = [];
-let _jpNotes = [];
-let _currentHighlight = -1;
+let _state = { notes: [], clef: 'treble', key: 'C', meter: '4/4', bpm: 120 };
+let _mode = 'treble';           // 'treble' | 'jianpu'
+let _highlightIdx = -1;
+let _highlightColor = '#fbbf24';
+let _vfRefs = [];   // [{staveNote, svgX, noteIdx}]
+let _jpRefs = [];   // [{el, svgX, noteIdx}]
+let _followBeat = -1;           // >=0: 小节跟随模式（只渲染当前窗口）
+const FOLLOW_WINDOW = { before: 0, after: 2 };  // 当前小节 + 后 2 小节，铺满一行更好读
+const _trackPalette = ['#60a5fa', '#a78bfa', '#34d399', '#f472b6',
+                       '#fbbf24', '#38bdf8', '#fb923c', '#e879f9'];
 
-const { Factory, Renderer, Stave, StaveNote, Formatter, Voice } = Vex.Flow;
+const { Renderer, Stave, StaveNote, GhostNote, Formatter, Voice } = Vex.Flow;
 
-// MIDI → VexFlow pitch 字符串（C4 = 60 → "c/4"）
 const pitchMap = {0:'c',1:'c#',2:'d',3:'d#',4:'e',5:'f',6:'f#',7:'g',8:'g#',9:'a',10:'a#',11:'b'};
-const midiToVf = (m) => pitchMap[m%12] + '/' + (Math.floor(m/12)-1);
+const midiToVf = (m) => pitchMap[m % 12] + '/' + (Math.floor(m / 12) - 1);
 
-// duration 秒 → VexFlow duration code
-const durToVf = (d) => {
-  if (d >= 1.9) return 'w';
-  if (d >= 1.4) return 'd';
-  if (d >= 0.9) return 'h';
-  if (d >= 0.7) return 'dh';
-  if (d >= 0.45) return 'q';
-  if (d >= 0.33) return 'dq';
-  if (d >= 0.23) return '8';
-  if (d >= 0.15) return 'd8';
-  return '16';
-};
-
-// ===== 五线谱 =====
-function renderTreble(notes, clef, key, meter) {
-  const svg = document.getElementById('treble-svg');
-  svg.innerHTML = '';
-  const W = svg.clientWidth || 600;
-
-  const r = new Renderer(svg, Renderer.Backends.SVG);
-  r.resize(W, 70);
-  const ctx = r.getContext();
-
-  const stave = new Stave(40, 3, W - 80);
-  stave.addClef(clef).addKeySignature(key).addTimeSignature(meter);
-  stave.setContext(ctx).draw();
-
-  const beat = parseInt(meter.split('/')[0]);
-  const beatUnit = parseInt(meter.split('/')[1]);
-
-  const vfNotes = [];
-  let totalDur = 0;
-  for (const n of notes) {
-    const d = Math.min(n.duration || 1.0, 1.5);
-    vfNotes.push(new StaveNote({
-      keys: [midiToVf(n.midi)],
-      duration: durToVf(d),
-      clef: clef,
-    }));
-    totalDur += d;
-    if (totalDur >= beat * beatUnit * 4) break;
-  }
-
-  const voice = new Voice({ numBeats: beat, beatValue: beatUnit });
-  voice.setStrict(false);
-  voice.addTickables(vfNotes);
-  new Formatter().joinVoices([voice]).formatToStave([voice], stave);
-  voice.draw(ctx, stave);
-
-  _vfNotes = vfNotes;
+// 拍数(浮点) → VexFlow duration code + dots
+function beatsToVf(b) {
+  const beats = Math.max(0.25, b);
+  if (Math.abs(beats - 4.0)  < 0.05) return { dur: 'w', dots: 0 };
+  if (Math.abs(beats - 3.0)  < 0.05) return { dur: 'h', dots: 1 };
+  if (Math.abs(beats - 2.0)  < 0.05) return { dur: 'h', dots: 0 };
+  if (Math.abs(beats - 1.5)  < 0.05) return { dur: 'q', dots: 1 };
+  if (Math.abs(beats - 1.0)  < 0.05) return { dur: 'q', dots: 0 };
+  if (Math.abs(beats - 0.75) < 0.05) return { dur: '8', dots: 1 };
+  if (Math.abs(beats - 0.5)  < 0.05) return { dur: '8', dots: 0 };
+  return { dur: '16', dots: 0 };
 }
 
-// ===== 简谱（手写 SVG）=====
-function renderJianpu(notes, meter) {
+// ===== 轨道分组与小节切分 =====
+function trackOrder(notes) {
+  const order = [];
+  for (const n of notes) {
+    const t = n.track || 'main';
+    if (!order.includes(t)) order.push(t);
+  }
+  return order;
+}
+
+function chunkMeasuresFor(notes, bpm, meter) {
+  const beatsPerBar = parseInt(meter.split('/')[0], 10) || 4;
+  const items = notes.map((n, i) => ({
+    idx: i, midi: n.midi,
+    dur: (n.duration || 0.5) / 60.0 * bpm,
+    start: (n.time || 0) / 60.0 * bpm,
+  }));
+  items.sort((a, b) => a.start - b.start || a.idx - b.idx);
+
+  const measures = [];
+  for (const it of items) {
+    const barIdx = Math.floor(it.start / beatsPerBar);
+    let bar = measures[measures.length - 1];
+    if (!bar || bar.barIdx !== barIdx) {
+      bar = { barIdx, chords: [] };
+      measures.push(bar);
+    }
+    const chord = bar.chords.find(c => Math.abs(c.startBeat - it.start) < 0.01);
+    if (chord) {
+      chord.midis.push(it.midi);
+      chord.dur = Math.max(chord.dur, it.dur);
+      chord.tracks.push(it.track);
+    } else {
+      bar.chords.push({ startBeat: it.start, midis: [it.midi], dur: it.dur,
+                        idx: it.idx, tracks: [it.track] });
+    }
+  }
+  return { measures, beatsPerBar };
+}
+
+// 整首曲子（所有轨道展平）的小节切分 — 只用于计算总宽度
+function chunkAll(notes, bpm, meter) {
+  const { measures } = chunkMeasuresFor(notes, bpm, meter);
+  return measures;
+}
+
+// ===== 休止符补齐：剩余拍数 → GhostNote 代码列表 =====
+const REST_DUR = { w: 4, h: 2, q: 1, 8: 0.5, 16: 0.25 };
+function restForBeats(rb) {
+  const order = ['w', 'h', 'q', '8', '16'];
+  const parts = [];
+  let rest = Math.round(rb * 100) / 100;
+  for (const code of order) {
+    const v = REST_DUR[code];
+    while (rest + 0.001 >= v) { parts.push(code); rest = Math.round((rest - v) * 100) / 100; }
+    if (rest <= 0) break;
+  }
+  return parts;
+}
+
+// 深色主题：把 VexFlow 默认黑色/深灰谱元素提亮为浅色
+const DARK_COLORS = new Set(['black', '#000', '#000000', '#444', '#333', '#999999']);
+const LIGHT_FILL = '#dfe6f0';
+function lightenSvg(root) {
+  const els = root.querySelectorAll('*');
+  for (const el of els) {
+    for (const attr of ['fill', 'stroke']) {
+      const v = el.getAttribute(attr);
+      if (v && DARK_COLORS.has(v.toLowerCase())) {
+        el.setAttribute(attr, LIGHT_FILL);
+      }
+    }
+  }
+}
+
+// ===== 每轨道一行五线谱 =====
+function pickClefFor(notes) {
+  if (!notes.length) return _state.clef;
+  const avg = notes.reduce((s, n) => s + n.midi, 0) / notes.length;
+  return avg < 55 ? 'bass' : 'treble';
+}
+
+function followBarRange() {
+  // 跟随模式：返回 [barFrom, barTo]，否则 null（完整渲染）
+  if (_followBeat < 0) return null;
+  const beatsPerBar = parseInt(_state.meter.split('/')[0], 10) || 4;
+  const curBar = Math.floor(_followBeat / beatsPerBar);
+  return [Math.max(0, curBar - FOLLOW_WINDOW.before),
+          curBar + FOLLOW_WINDOW.after];
+}
+
+function measureInRange(bar, range) {
+  return !range || (bar >= range[0] && bar <= range[1]);
+}
+
+function renderTreble() {
+  const svg = document.getElementById('treble-svg');
+  svg.innerHTML = '';
+  _vfRefs = [];
+
+  const tracks = trackOrder(_state.notes);
+  if (tracks.length === 0) return;
+
+  const beatsPerBar = parseInt(_state.meter.split('/')[0], 10) || 4;
+  const allMeasures = chunkAll(_state.notes, _state.bpm, _state.meter);
+  if (allMeasures.length === 0) return;
+
+  const range = followBarRange();
+  const FOLLOW_COUNT = FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after;
+  // 逻辑尺寸（与容器无关）：跟随模式用较大的小节宽（拉伸铺满），非跟随 96px/小节折行
+  const MEAS_W = range ? 180 : 96;
+  const colsPerLine = range ? FOLLOW_COUNT : 8;
+  const LINE_H = 52, PAD_H = 24;
+
+  // 先算每一轨的行数，得到总高
+  const trackRows = tracks.map(tr => {
+    const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
+    const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
+    const vis = measures.filter(m => measureInRange(m.barIdx, range));
+    return Math.max(1, Math.ceil(vis.length / colsPerLine));
+  });
+  const totalRows = trackRows.reduce((s, x) => s + x, 0);
+  const totalH = PAD_H + totalRows * LINE_H + 18;
+  const totalW = 55 + colsPerLine * MEAS_W + 30;
+
+  // SVG 用 viewBox + width:100% 等比缩放，铺满容器任何宽度都不会截断
+  // 顺序：先让 VexFlow resize（它设置 width/height），再用 viewBox 接管缩放
+  const r = new Renderer(svg, Renderer.Backends.SVG);
+  r.resize(totalW, totalH);
+  svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
+  svg.style.width = '100%';
+  svg.style.height = 'auto';
+  svg.removeAttribute('height');
+  const ctx = r.getContext();
+
+  let yCursor = PAD_H;
+  tracks.forEach((tr, ti) => {
+    const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
+    const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
+    if (measures.length === 0) return;
+    const clef = pickClefFor(trNotes);
+    const vis = measures.filter(m => measureInRange(m.barIdx, range));
+    if (vis.length === 0) return;
+
+    // 折行：每行 colsPerLine 个小节
+    const rows = [];
+    for (let s = 0; s < vis.length; s += colsPerLine) {
+      rows.push(vis.slice(s, s + colsPerLine));
+    }
+
+    rows.forEach((rowMeasures, ri) => {
+      const y0 = yCursor;
+      rowMeasures.forEach((bar, bi) => {
+        const x = 55 + bi * MEAS_W;
+        const st = new Stave(x, y0, MEAS_W);
+        // 每行开头重新写谱号/调号（拍号只写全曲第一行）
+        if (bi === 0) {
+          st.addClef(clef).addKeySignature(_state.key);
+          if (ri === 0 && ti === 0) st.addTimeSignature(_state.meter);
+        }
+        // 跟随模式：当前小节高亮背景带（"现在弹到这儿"）
+        if (range && bar.barIdx === range[0] + FOLLOW_WINDOW.before) {
+          const NS2 = 'http://www.w3.org/2000/svg';
+          const rect = document.createElementNS(NS2, 'rect');
+          rect.setAttribute('x', x + 2);
+          rect.setAttribute('y', y0 - 6);
+          rect.setAttribute('width', MEAS_W - 4);
+          rect.setAttribute('height', 46);
+          rect.setAttribute('fill', '#3b82f6');
+          rect.setAttribute('opacity', '0.18');
+          rect.setAttribute('rx', '4');
+          svg.insertBefore(rect, svg.firstChild);
+        }
+        st.setContext(ctx).draw();
+
+        const barStart = bar.barIdx * beatsPerBar;
+        const tickables = [];
+        const chordToVf = new Map();
+
+        const sorted = bar.chords.slice().sort((a, b) => a.startBeat - b.startBeat);
+        let cursor = barStart;
+        const leadingGap = sorted.length ? Math.max(0, sorted[0].startBeat - barStart) : beatsPerBar;
+        if (leadingGap > 0.09) {
+          for (const code of restForBeats(leadingGap)) tickables.push(new GhostNote({ duration: code }));
+        }
+
+        for (const ch of sorted) {
+          const { dur, dots } = beatsToVf(ch.dur);
+          const vfN = new StaveNote({
+            keys: ch.midis.slice().sort((a, b) => a - b).map(midiToVf),
+            duration: dur, dots: dots,
+            clef: clef, auto_stem: true,
+          });
+          // 高亮目标：直接用目标色绘制
+          if (ch.idx === _highlightIdx) {
+            vfN.setStyle({ fillStyle: _highlightColor, strokeStyle: _highlightColor });
+          }
+          tickables.push(vfN);
+          chordToVf.set(ch, vfN);
+          cursor = Math.max(cursor, ch.startBeat + ch.dur);
+        }
+        const tailGap = Math.max(0, barStart + beatsPerBar - cursor);
+        if (tailGap > 0.09) {
+          for (const code of restForBeats(tailGap)) tickables.push(new GhostNote({ duration: code }));
+        }
+
+        const voice = new Voice({ num_beats: beatsPerBar, beat_value: 4 });
+        voice.setStrict(false);
+        voice.addTickables(tickables);
+        try {
+          new Formatter().joinVoices([voice]).formatToStave([voice], st);
+          voice.draw(ctx, st);
+        } catch (e) {
+          console.log('bar render error:', e.message || e);
+        }
+
+        bar.chords.forEach((ch, ci) => {
+          const vfN = chordToVf.get(ch);
+          if (!vfN) return;
+          const rowLocalX = x + 22 + ci * 14;
+          _vfRefs.push({ staveNote: vfN, svgX: rowLocalX,
+                         noteIdx: ch.idx, track: tr, line: yi(ri, ti, trackRows) });
+        });
+      });
+      // 轨道标签：只在本轨第一行左侧
+      if (ri === 0) {
+        ctx.save();
+        ctx.setFont('sans-serif', 9);
+        ctx.setFillStyle(_trackPalette[ti % _trackPalette.length]);
+        ctx.fillText(tr.length > 6 ? tr.slice(0, 6) + '…' : tr, 2, y0 + 14);
+        ctx.restore();
+      }
+      yCursor += LINE_H;
+    });
+  });
+  lightenSvg(svg);   // 黑色 → 浅色（深色主题）
+}
+
+function yi(ri, ti, trackRows) {
+  let line = 0;
+  for (let i = 0; i < ti; i++) line += trackRows[i];
+  return line + ri;
+}
+
+// ===== 每轨道一行简谱 =====
+function renderJianpu() {
   const svg = document.getElementById('jp-svg');
   svg.innerHTML = '';
-  const W = svg.clientWidth || 600;
-  const H = 90;
+  _jpRefs = [];
 
-  // SVG 根
+  const tracks = trackOrder(_state.notes);
+  if (tracks.length === 0) return;
+
+  const beatsPerBar = parseInt(_state.meter.split('/')[0], 10) || 4;
+  const allMeasures = chunkAll(_state.notes, _state.bpm, _state.meter);
+  if (allMeasures.length === 0) return;
+
   const NS = 'http://www.w3.org/2000/svg';
+  const range = followBarRange();
+  const FOLLOW_COUNT = FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after;
+  const MEAS_W = range ? 180 : 96;
+  const colsPerLine = range ? FOLLOW_COUNT : 8;
+  const LINE_H = 42, PAD_H = 20;
 
-  // 调号下的简谱数字
-  // C大调 pitch class → 简谱（白键用数字，黑键用 # 前缀）
+  const trackRows = tracks.map(tr => {
+    const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
+    const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
+    const vis = measures.filter(m => measureInRange(m.barIdx, range));
+    return Math.max(1, Math.ceil(vis.length / colsPerLine));
+  });
+  const totalRows = trackRows.reduce((s, x) => s + x, 0);
+  const totalH = PAD_H + totalRows * LINE_H + 12;
+  const totalW = 55 + colsPerLine * MEAS_W + 30;
+  svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
+  svg.style.width = '100%';
+  svg.style.height = 'auto';
+  svg.removeAttribute('height');
+
   const jpMap = {0:'1',1:'#1',2:'2',3:'#2',4:'3',5:'4',6:'#4',7:'5',8:'#5',9:'6',10:'#6',11:'7'};
 
-  // 水平均匀铺开（最多 16 个）
-  const maxNotes = Math.min(notes.length, 16);
-  const leftPad = 20;
-  const rightPad = 20;
-  const usable = W - leftPad - rightPad;
-  const spacing = maxNotes > 1 ? usable / maxNotes : usable;
+  let yCursor = PAD_H;
+  tracks.forEach((tr, ti) => {
+    const trNotes = _state.notes.filter(n => (n.track || 'main') === tr);
+    const { measures } = chunkMeasuresFor(trNotes, _state.bpm, _state.meter);
+    if (measures.length === 0) return;
+    const vis = measures.filter(m => measureInRange(m.barIdx, range));
+    if (vis.length === 0) return;
 
-  // 画一下 4 条水平线（简谱有 4 线，从上到下是 1 2 3 4 5 6 7 i）
-  // 简化：画一条基准线 + 数字
-  const baseY = H * 0.55;  // 数字中心
-
-  for (let i = 0; i < maxNotes; i++) {
-    const n = notes[i];
-    const pc = n.midi % 12;
-    const digit = jpMap[pc] || '?';
-    const octave = Math.floor(n.midi / 12) - 5;  // C4=60 → octave 1
-
-    const cx = leftPad + spacing * (i + 0.5);
-
-    // 文本
-    const text = document.createElementNS(NS, 'text');
-    text.setAttribute('x', cx);
-    text.setAttribute('y', baseY);
-    text.setAttribute('text-anchor', 'middle');
-    text.setAttribute('font-size', '22');
-    text.setAttribute('font-family', 'sans-serif');
-    text.setAttribute('fill', '#d0d0d0');
-    text.setAttribute('font-weight', 'bold');
-    text.textContent = digit;
-    svg.appendChild(text);
-
-    // 八度加点（上加点 = octave>0, 下加点 = octave<0）
-    if (octave > 0) {
-      // 上加点：在数字上方画小圆点
-      for (let d = 0; d < octave; d++) {
-        const dot = document.createElementNS(NS, 'circle');
-        dot.setAttribute('cx', cx);
-        dot.setAttribute('cy', baseY - 16 - d * 6);
-        dot.setAttribute('r', 2.5);
-        dot.setAttribute('fill', '#d0d0d0');
-        svg.appendChild(dot);
-      }
-    } else if (octave < 0) {
-      // 下加点
-      for (let d = 0; d < -octave; d++) {
-        const dot = document.createElementNS(NS, 'circle');
-        dot.setAttribute('cx', cx);
-        dot.setAttribute('cy', baseY + 8 + d * 6);
-        dot.setAttribute('r', 2.5);
-        dot.setAttribute('fill', '#d0d0d0');
-        svg.appendChild(dot);
-      }
+    const rows = [];
+    for (let s = 0; s < vis.length; s += colsPerLine) {
+      rows.push(vis.slice(s, s + colsPerLine));
     }
-
-    // 时值下划线（duration < 1 且不是 1 的倍数 → 加横线）
-    const dur = n.duration || 1.0;
-    if (dur < 1.0) {
-      // 八分 = 1 条线，十六分 = 2 条
-      const lines = dur < 0.3 ? 2 : 1;
-      for (let li = 0; li < lines; li++) {
-        const line = document.createElementNS(NS, 'line');
-        line.setAttribute('x1', cx - 10);
-        line.setAttribute('x2', cx + 10);
-        line.setAttribute('y1', baseY + 12 + li * 4);
-        line.setAttribute('y2', baseY + 12 + li * 4);
-        line.setAttribute('stroke', '#888');
-        line.setAttribute('stroke-width', '1.5');
-        svg.appendChild(line);
-      }
-    }
-
-    // 存引用（高亮用）
-    text.dataset.idx = i;
-    text.classList.add('jp-note');
-  }
-
-  // 存 SVG 元素引用
-  _jpNotes = [];
-  const jpElements = svg.querySelectorAll('.jp-note');
-  jpElements.forEach(el => {
-    _jpNotes.push(el);
+    rows.forEach((rowMeasures, ri) => {
+      const lineY = yCursor;
+      const baseY = lineY + 20;
+      rowMeasures.forEach((bar, bi) => {
+        const x0 = 55 + bi * MEAS_W + 8;
+        const barStart = bar.barIdx * beatsPerBar;
+        const lx = 55 + bi * MEAS_W - 2;
+        addLine(svg, NS, lx, lineY, lx, lineY + 40, '#3a3a5e', 1.5);
+        // 轨道名：只在本轨第一行
+        if (bi === 0 && ri === 0) {
+          const t = addText(svg, NS, 4, baseY, tr.length > 5 ? tr.slice(0, 5) : tr, 0, 10, '#888');
+          t.setAttribute('text-anchor', 'start');
+        }
+        for (const ch of bar.chords) {
+          const localBeat = ch.startBeat - barStart;
+          const cx = x0 + localBeat * (MEAS_W - 16) / beatsPerBar;
+          const sortedMidis = ch.midis.slice().sort((a, b) => a - b);
+          sortedMidis.forEach((midi, ki) => {
+            const digit = jpMap[midi % 12] || '?';
+            const oct = Math.floor(midi / 12) - 5;      // C4(60) → 0
+            const y = baseY - (sortedMidis.length - 1 - ki) * 16;
+            const el = addText(svg, NS, cx, y, digit, oct, 22);
+            el.dataset.idx = ch.idx;
+            el.classList.add('jp-note');
+            const durBeats = ch.dur;
+            if (durBeats < 0.4) addUnderline(svg, NS, cx, y + 8, 2);
+            else if (durBeats < 0.8) addUnderline(svg, NS, cx, y + 8, 1);
+            if (durBeats >= 1.9) addDash(svg, NS, cx, y, 1);
+            if (durBeats >= 3.9) addDash(svg, NS, cx + 14, y, 1);
+            _jpRefs.push({ el, svgX: cx, svgY: lineY, noteIdx: ch.idx, track: tr,
+                           line: yi(ri, ti, trackRows) });
+          });
+        }
+      });
+      yCursor += LINE_H;
+    });
   });
+  if (_highlightIdx >= 0) applyJpHighlight();
+}
 
-  // 也存所有 jp 相关元素（方便高亮）
-  svg._allJxElements = svg.querySelectorAll('text, circle, line');
+// ---- SVG helpers ----
+function addText(svg, NS, x, y, digit, oct, size, color) {
+  const g = document.createElementNS(NS, 'g');
+  const t = document.createElementNS(NS, 'text');
+  t.setAttribute('x', x); t.setAttribute('y', y);
+  t.setAttribute('text-anchor', 'middle');
+  t.setAttribute('font-size', size);
+  t.setAttribute('font-family', 'sans-serif');
+  t.setAttribute('fill', color || '#e8e8e8');
+  t.setAttribute('font-weight', 'bold');
+  t.textContent = digit;
+  g.appendChild(t);
+  if (oct > 0) {
+    for (let d = 0; d < oct; d++) {
+      const c = document.createElementNS(NS, 'circle');
+      c.setAttribute('cx', x); c.setAttribute('cy', y - size * 0.85 - d * 7);
+      c.setAttribute('r', 2.6); c.setAttribute('fill', color || '#e8e8e8');
+      g.appendChild(c);
+    }
+  } else if (oct < 0) {
+    for (let d = 0; d < -oct; d++) {
+      const c = document.createElementNS(NS, 'circle');
+      c.setAttribute('cx', x); c.setAttribute('cy', y + size * 0.35 + d * 7);
+      c.setAttribute('r', 2.6); c.setAttribute('fill', color || '#e8e8e8');
+      g.appendChild(c);
+    }
+  }
+  svg.appendChild(g);
+  return t;
+}
+function addUnderline(svg, NS, cx, y, count) {
+  for (let i = 0; i < count; i++) {
+    const l = document.createElementNS(NS, 'line');
+    l.setAttribute('x1', cx - 9); l.setAttribute('x2', cx + 9);
+    l.setAttribute('y1', y + 8 + i * 4); l.setAttribute('y2', y + 8 + i * 4);
+    l.setAttribute('stroke', '#888'); l.setAttribute('stroke-width', '1.6');
+    svg.appendChild(l);
+  }
+}
+function addDash(svg, NS, cx, y, n) {
+  for (let i = 0; i < n; i++) {
+    const t = document.createElementNS(NS, 'text');
+    t.setAttribute('x', cx + 12 + i * 12); t.setAttribute('y', y);
+    t.setAttribute('text-anchor', 'middle');
+    t.setAttribute('font-size', 22); t.setAttribute('fill', '#e8e8e8'); t.setAttribute('font-weight', 'bold');
+    t.textContent = '-';
+    svg.appendChild(t);
+  }
+}
+function addLine(svg, NS, x1, y1, x2, y2, color, w) {
+  const l = document.createElementNS(NS, 'line');
+  l.setAttribute('x1', x1); l.setAttribute('y1', y1);
+  l.setAttribute('x2', x2); l.setAttribute('y2', y2);
+  l.setAttribute('stroke', color); l.setAttribute('stroke-width', w);
+  svg.appendChild(l);
+}
+
+// ===== 高亮 =====
+function applyVfHighlight() {
+  renderTreble();   // 原子化重绘：目标音符已 inline 目标色
+}
+function applyJpHighlight() {
+  const color = _highlightColor;
+  for (const ref of _jpRefs) {
+    const on = ref.noteIdx === _highlightIdx;
+    ref.el.setAttribute('fill', on ? color : '#e8e8e8');
+    ref.el.setAttribute('font-size', on ? '27' : '22');
+  }
+  scrollToNote(ref => ref.noteIdx === _highlightIdx);
+}
+function applyHighlight() {
+  if (_mode === 'treble') applyVfHighlight();
+  else applyJpHighlight();
+}
+function scrollToNote(matchFn) {
+  const list = _mode === 'treble' ? _vfRefs : _jpRefs;
+  const ref = list.find(matchFn);
+  if (!ref) return;
+  const viewW = document.getElementById('wrap-tr').clientWidth || 700;
+  // 折行后需同时滚到对应行：目标 y = 行号 * 行高
+  const line = ref.line || 0;
+  const lineH = _mode === 'treble' ? 52 : 42;
+  const targetY = Math.max(0, (line + 0) * lineH - 10);
+  const wrap = document.getElementById('wrap-tr');
+  wrap.scrollTop = targetY;
+  document.getElementById('wrap-jp').scrollTop = targetY;
+  // 水平居中（行内 svgX）
+  const targetX = Math.max(0, ref.svgX - viewW / 2 + 60);
+  wrap.scrollLeft = targetX;
+  document.getElementById('wrap-jp').scrollLeft = targetX;
+}
+
+// ===== 模式切换 =====
+function setMode(mode) {
+  _mode = (mode === 'jianpu') ? 'jianpu' : 'treble';
+  const showTr = _mode === 'treble';
+  document.getElementById('wrap-tr').style.display = showTr ? 'block' : 'none';
+  document.getElementById('wrap-jp').style.display = showTr ? 'none' : 'block';
+  // 渲染当前模式
+  if (_state.notes.length > 0) {
+    if (showTr) renderTreble(); else renderJianpu();
+  }
+  // 布局稳定后再渲染一次（clientWidth 此时才可靠）
+  requestAnimationFrame(() => {
+    if (_state.notes.length > 0) {
+      if (showTr) renderTreble(); else renderJianpu();
+    }
+  });
+}
+
+// ===== 演奏跟随（按小节切分显示 + 自动跳转）=====
+function setFollow(beat) {
+  _followBeat = beat;
+  if (_state.notes.length > 0) {
+    if (_mode === 'treble') renderTreble(); else renderJianpu();
+  }
+  // 在当前小节后滚动到窗口开头
+  const wrap = document.getElementById('wrap-tr');
+  wrap.scrollTop = 0;
+  wrap.scrollLeft = 0;
+}
+function clearFollow() {
+  _followBeat = -1;
+  if (_state.notes.length > 0) {
+    if (_mode === 'treble') renderTreble(); else renderJianpu();
+  }
 }
 
 // ===== 主入口 =====
 function render(data) {
   if (!window.Vex || !Vex.Flow) {
-    document.getElementById('treble-svg').innerHTML =
-      '<div class="hint">VexFlow 加载失败 — 请确认 vexflow.js 在 assets/ 目录</div>';
+    document.getElementById('hint').textContent = 'VexFlow 加载失败 — 请确认 assets/vexflow.js 存在';
     return;
   }
-  const notes = data.notes || [];
-  const clef  = data.clef  || 'treble';
-  const key   = data.key   || 'C';
-  const meter = data.meter || '4/4';
+  _state.notes = (data && data.notes) || [];
+  _state.clef  = (data && data.clef)  || 'treble';
+  _state.key   = (data && data.key)   || 'C';
+  _state.meter = (data && data.meter) || '4/4';
+  _state.bpm   = (data && data.bpm)   || 120;
+  _highlightIdx = -1;
+  _followBeat = -1;   // 新数据 → 回到完整谱面视图
 
-  if (notes.length === 0) {
-    document.getElementById('treble-svg').innerHTML =
-      '<div class="hint">选择练习或导入 MIDI 开始</div>';
-    document.getElementById('jp-svg').innerHTML = '';
+  if (_state.notes.length === 0) {
+    const hint = document.getElementById('hint');
+    hint.style.display = 'block';
+    hint.textContent = '选择练习或导入 MIDI 开始';
+    document.getElementById('wrap-tr').style.display = 'none';
+    document.getElementById('wrap-jp').style.display = 'none';
     return;
   }
-
-  renderTreble(notes, clef, key, meter);
-  renderJianpu(notes, meter);
-  _currentHighlight = -1;
+  document.getElementById('hint').style.display = 'none';
+  if (_mode === 'treble') {
+    document.getElementById('wrap-tr').style.display = 'block';
+    document.getElementById('wrap-jp').style.display = 'none';
+    renderTreble();
+  } else {
+    document.getElementById('wrap-tr').style.display = 'none';
+    document.getElementById('wrap-jp').style.display = 'block';
+    renderJianpu();
+  }
 }
 
-// ===== 高亮当前音符 =====
 function highlightVf(index, color) {
-  color = color || '#fbbf24';
-  // 五线谱
-  if (index >= 0 && index < _vfNotes.length) {
-    // 先清除之前的高亮
-    if (_currentHighlight >= 0 && _currentHighlight < _vfNotes.length) {
-      try { _vfNotes[_currentHighlight].setStyle({ fillStyle: '#000000' }); _vfNotes[_currentHighlight].draw(); } catch(e){}
-    }
-    try {
-      _vfNotes[index].setStyle({ fillStyle: color });
-      _vfNotes[index].draw();
-      _currentHighlight = index;
-    } catch(e){}
-  }
-  // 简谱 — 改 text fill
-  const jpTexts = document.querySelectorAll('#jp-svg text.jp-note');
-  jpTexts.forEach(el => {
-    const i = parseInt(el.dataset.idx);
-    el.setAttribute('fill', i === index ? color : '#d0d0d0');
-    el.setAttribute('font-size', i === index ? '26' : '22');
-  });
+  _highlightIdx = index;
+  _highlightColor = color || '#fbbf24';
+  applyHighlight();
 }
+function clearHighlight() {
+  _highlightIdx = -1;
+  applyHighlight();
+}
+
+// 容器尺寸变化（拖动分隔条/窗口）时重渲染，保证谱面铺满
+(function () {
+  let rszTimer = null;
+  window.addEventListener('resize', function () {
+    if (rszTimer) clearTimeout(rszTimer);
+    rszTimer = setTimeout(function () {
+      if (_state.notes.length > 0) {
+        if (_mode === 'treble') renderTreble(); else renderJianpu();
+      }
+    }, 120);
+  });
+})();
 </script>
 </body>
 </html>

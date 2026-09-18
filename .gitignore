@@ -11,8 +11,8 @@ docs/superpowers/
 .vscode/
 .idea/
 
-# 临时诊断脚本
-_diag*.py
+# 临时诊断脚本（历史遗留测试/补丁，已归档）
+test_script/
 
 # 用户采样备份（纯运行时生成的安全副本）
 plugins/pad_sentry/samples_backup/

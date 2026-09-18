@@ -26,7 +26,7 @@ from PyQt6.QtCore import QUrl as _QUrl
 from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWidgets import (
     QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QLabel,
-    QPlainTextEdit, QPushButton, QSlider, QVBoxLayout, QWidget,
+    QPlainTextEdit, QPushButton, QSlider, QSplitter, QVBoxLayout, QWidget,
 )
 import mido
 
@@ -45,6 +45,7 @@ class PianoNote:
     time: float          # 飘到判定线的目标时间（秒）
     duration: float = 0.5  # 持续时间（秒），决定音符块高度
     velocity: int = 80
+    track: str = "main"  # 轨道标识（demo="main"；MIDI 导入=轨道名）
     rated: bool = False
     rating: str = ""     # perfect / good / ok / miss
     hit_velocity: int = 0
@@ -78,12 +79,24 @@ class PianoLaneWidget(QWidget):
     """
 
     NOTE_COLORS = {
-        "": "#60a5fa",          # 未判定: 蓝
+        "": "#60a5fa",          # 未判定默认: 蓝
         "perfect": "#22c55e",
         "good": "#3b82f6",
         "ok": "#f59e0b",
         "miss": "#ef4444",
     }
+
+    # 轨道显色（未判定时按 track 分色）
+    TRACK_COLORS = [
+        "#60a5fa",  # 蓝
+        "#a78bfa",  # 紫
+        "#34d399",  # 绿
+        "#f472b6",  # 粉
+        "#fbbf24",  # 黄
+        "#38bdf8",  # 青
+        "#fb923c",  # 橙
+        "#e879f9",  # 洋红
+    ]
 
     # 显示范围: 61 键 C2(36) ~ C7(96) — 匹配 KL Essential M3
     RANGE_START = 36
@@ -105,6 +118,7 @@ class PianoLaneWidget(QWidget):
         # 练习数据
         self._notes: List[PianoNote] = []
         self._playing = False
+        self._paused = False
         self._play_time = 0.0       # 秒
         self._bpm = 120.0
         self._pixels_per_second = 200.0  # 飘速（像素/秒）
@@ -133,6 +147,10 @@ class PianoLaneWidget(QWidget):
         # 浮动分数特效 [{text, color, age_sec, x_ratio, base_y}]
         self._floats = []
 
+        # 轨道名 → 颜色（稳定映射，供音符显色）
+        self._track_colors: dict = {}
+        self._track_order: list = []
+
         # 统计
         self._hits = {"perfect": 0, "good": 0, "ok": 0, "miss": 0}
         self._hit_count = 0
@@ -142,14 +160,28 @@ class PianoLaneWidget(QWidget):
     def set_notes(self, notes: List[PianoNote], bpm: float = 120.0):
         self._notes = [PianoNote(
             id=i, midi=n.midi, time=n.time, duration=n.duration,
-            velocity=n.velocity,
+            velocity=n.velocity, track=n.track,
         ) for i, n in enumerate(notes)]
         self._bpm = bpm
         self._play_time = 0.0
         self._floats = []
         self._hits = {"perfect": 0, "good": 0, "ok": 0, "miss": 0}
         self._hit_count = 0
+        # 建立轨道 → 颜色映射（保持稳定）
+        track_idxs: dict = {}
+        for n in self._notes:
+            if n.track not in track_idxs:
+                track_idxs[n.track] = len(track_idxs)
+        self._track_order = list(track_idxs.keys())
+        self._track_colors = {
+            name: self.TRACK_COLORS[i % len(self.TRACK_COLORS)]
+            for i, name in enumerate(self._track_order)
+        }
         self.update()
+
+    def track_color(self, name: str) -> str:
+        """轨道名 → 颜色（含未登记的兜底）。"""
+        return self._track_colors.get(name, self.NOTE_COLORS[""])
 
     def set_pixels_per_second(self, pps: float):
         """调飘速——越大飘越快。"""
@@ -173,12 +205,29 @@ class PianoLaneWidget(QWidget):
         self._prep_remaining_ms = self._prep_total_ms
         self._prep_last_tick_sec = self._prep_remaining_ms
         self._playing = False  # prep 期间不判定
+        self._paused = False
         self._play_time = 0.0
         self._last_ts = time.monotonic()
         self._timer.start()
 
+    def pause(self):
+        """暂停：冻结时间推进与判定，保留现场。"""
+        if self._playing and not self._paused:
+            self._paused = True
+            self._last_ts = time.monotonic()
+
+    def resume(self):
+        if self._paused:
+            self._paused = False
+            self._last_ts = time.monotonic()
+
+    @property
+    def paused(self) -> bool:
+        return self._paused
+
     def stop(self):
         self._playing = False
+        self._paused = False
         self._timer.stop()
 
     def reset(self):
@@ -251,6 +300,10 @@ class PianoLaneWidget(QWidget):
         now = time.monotonic()
         dt = now - self._last_ts
         self._last_ts = now
+
+        # 暂停：冻结（不推进 play_time、不判定）
+        if self._paused:
+            return
 
         # === 倒计时 prep 阶段 ===
         if self._prep_remaining_ms > 0:
@@ -398,6 +451,24 @@ class PianoLaneWidget(QWidget):
         # 画黑白键背景
         self._draw_key_background(p, W, H)
 
+        # 轨道图例（左上角）：当前练习有几个轨道，各是什么颜色
+        if self._track_order:
+            font = p.font()
+            font.setPointSize(9)
+            font.setBold(False)
+            p.setFont(font)
+            lx = 8
+            ly = 14
+            for ti, name in enumerate(self._track_order):
+                color = QColor(self._track_colors[name])
+                p.fillRect(QRectF(lx, ly - 8, 12, 12), color)
+                p.setPen(QPen(QColor("#ddd")))
+                label = name if len(self._track_order) <= 4 else f"#{ti + 1}"
+                p.drawText(QRectF(lx + 15, ly - 10, 160, 16),
+                           Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
+                           label)
+                lx += 185
+
         # 画判定线 — 贴底部，醒目
         jy = self._judgment_line_y
         # 先画粗发光带（判定区背景）
@@ -418,12 +489,15 @@ class PianoLaneWidget(QWidget):
             if xr is not None:
                 p.fillRect(xr, QColor(34, 197, 94, 180))
 
-        # 画音符
+        # 画音符 — 判定后按结果色，未判定按轨道色
         for n in self._notes:
             rect = self._note_rect(n)
             if rect is None:
                 continue
-            color = self.NOTE_COLORS.get(n.rating, self.NOTE_COLORS[""])
+            if n.rated or n.rating:
+                color = self.NOTE_COLORS.get(n.rating, self.NOTE_COLORS[""])
+            else:
+                color = self.track_color(n.track)
             p.fillRect(rect, QColor(color))
             p.setPen(QPen(QColor("white")))
             p.drawRect(rect)
@@ -505,14 +579,8 @@ def make_demo_c_major_scale(bpm: float = 120.0) -> List[PianoNote]:
     """C 大调音阶上升: C4 D4 E4 F4 G4 A4 B4 C5 — 每个音一拍。"""
     beat_sec = 60.0 / bpm
     notes = [
-        PianoNote(id=0, midi=60, time=1 * beat_sec, duration=beat_sec * 0.8),  # C4
-        PianoNote(id=1, midi=62, time=2 * beat_sec, duration=beat_sec * 0.8),  # D4
-        PianoNote(id=2, midi=64, time=3 * beat_sec, duration=beat_sec * 0.8),  # E4
-        PianoNote(id=3, midi=65, time=4 * beat_sec, duration=beat_sec * 0.8),  # F4
-        PianoNote(id=4, midi=67, time=5 * beat_sec, duration=beat_sec * 0.8),  # G4
-        PianoNote(id=5, midi=69, time=6 * beat_sec, duration=beat_sec * 0.8),  # A4
-        PianoNote(id=6, midi=71, time=7 * beat_sec, duration=beat_sec * 0.8),  # B4
-        PianoNote(id=7, midi=72, time=8 * beat_sec, duration=beat_sec * 0.8),  # C5
+        PianoNote(id=i, midi=midi, time=0.5 + i * beat_sec, duration=beat_sec * 0.8)
+        for i, midi in enumerate((60, 62, 64, 65, 67, 69, 71, 72))
     ]
     return notes
 
@@ -559,6 +627,9 @@ class PracticePlugin(Plugin):
         self._vexview: Optional[QWebEngineView] = None
         self._state = "idle"   # idle | playing | finished
         self._pressed = set()  # 当前按住的 note（去重 note_off）
+        self._score_mode = "treble"   # treble | jianpu
+        self._vex_ready = False
+        self._vex_pending = None
 
     def on_activate(self, app):
         self.app = app
@@ -615,6 +686,14 @@ class PracticePlugin(Plugin):
         self._combo_ex.addItems(list(DEMO_PRESETS.keys()))
         ctrl.addWidget(self._combo_ex)
 
+        ctrl.addSpacing(8)
+        ctrl.addWidget(QLabel("谱面:"))
+        self._combo_score = QComboBox()
+        self._combo_score.addItems(["🎼 五线谱", "🔢 简谱"])
+        self._combo_score.setFixedWidth(92)
+        self._combo_score.currentIndexChanged.connect(self._on_score_mode_changed)
+        ctrl.addWidget(self._combo_score)
+
         ctrl.addSpacing(12)
         ctrl.addWidget(QLabel("BPM:"))
         self._slider_bpm = QSlider(Qt.Orientation.Horizontal)
@@ -646,6 +725,12 @@ class PracticePlugin(Plugin):
         self._btn_start.clicked.connect(self._on_start)
         ctrl.addWidget(self._btn_start)
 
+        self._btn_pause = QPushButton("⏸ 暂停")
+        self._btn_pause.setMinimumHeight(28)
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.clicked.connect(self._on_pause)
+        ctrl.addWidget(self._btn_pause)
+
         self._btn_reset = QPushButton("🔄 重置")
         self._btn_reset.setMinimumHeight(28)
         self._btn_reset.clicked.connect(self._on_reset)
@@ -653,20 +738,40 @@ class PracticePlugin(Plugin):
 
         layout.addLayout(ctrl)
 
-        # VexFlow 乐谱（五线谱 + 简谱）
+        # 可拖动分隔器：上方谱面区 / 下方钢琴帘
+        self._splitter = QSplitter(Qt.Orientation.Vertical)
+        self._splitter.setChildrenCollapsible(True)
+        self._splitter.setHandleWidth(6)
+
+        # VexFlow 乐谱（五线谱 + 简谱）— 高度可拖
         from plugins.practice._vex_html import VEXFLOW_HTML, VEXFLOW_BASE_URL
         self._vexview = QWebEngineView()
-        # 用本地 file:// URL 作为 base，使 HTML 里的 src="vexflow.js" 指向 assets/
         self._vexview.setHtml(VEXFLOW_HTML, VEXFLOW_BASE_URL)
-        self._vexview.setFixedHeight(160)
-        layout.addWidget(self._vexview)
+        self._vexview.loadFinished.connect(self._on_vex_loaded)
+        self._vex_ready = False     # loadFinished 后置 True
+        self._vex_pending = None    # loadFinished 前缓存的 render JS
+        self._vexview.setMinimumHeight(80)
+        self._splitter.addWidget(self._vexview)
 
         # 钢琴帘
         self._lane = PianoLaneWidget()
         self._slider_pps.valueChanged.connect(self._lane.set_pixels_per_second)
         self._lane.on_judged = self._on_judged
         self._lane.on_finished = self._on_finished
-        layout.addWidget(self._lane, 1)
+        self._lane.setMinimumHeight(200)
+        self._splitter.addWidget(self._lane)
+
+        # 演奏跟随定时器：周期性把当前拍喂给谱面做小节跳转
+        # 注意：PracticePlugin 不是 QObject，QTimer 不能挂 self，挂到 splitter 上
+        self._follow_timer = QTimer(self._splitter)
+        self._follow_timer.setInterval(120)
+        self._follow_timer.timeout.connect(self._on_follow_tick)
+        self._last_follow_bar = -1
+
+        # 初始比例：谱面 1 : 钢琴帘 2
+        self._splitter.setStretchFactor(0, 1)
+        self._splitter.setStretchFactor(1, 2)
+        layout.addWidget(self._splitter, 1)
 
         # 简化状态栏
         self._stats = QLabel('🎵 选择练习 → 导入 MIDI 或选 demo → ▶ 开始')
@@ -674,7 +779,6 @@ class PracticePlugin(Plugin):
         self._stats.setAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
         self._stats.setFixedHeight(22)
         layout.addWidget(self._stats)
-        return root
         return root
 
     # -------- 事件 --------
@@ -684,10 +788,12 @@ class PracticePlugin(Plugin):
             return
         bpm = float(self._slider_bpm.value())
 
-        if self._imported_notes:
+        if getattr(self, "_imported_notes", None):
             # 优先用已导入的 MIDI
             notes = self._imported_notes
             self._stats.setText(f"📂 用已导入的 {len(notes)} 个音符 @ {bpm:.0f} BPM → 开始!")
+            key = getattr(self, "_imported_key", "C")
+            meter = getattr(self, "_imported_meter", "4/4")
         else:
             # 用 demo
             name = self._combo_ex.currentText()
@@ -696,12 +802,50 @@ class PracticePlugin(Plugin):
                 return
             notes = factory(bpm)
             self._stats.setText(f"🎹 练习: {name} ({len(notes)} 音) → 开始!")
+            key = "C"
+            meter = "4/4"
 
         self._lane.set_notes(notes, bpm=bpm)
+        self._render_score(notes, bpm, key, meter)
         self._stats.setText("🎯 进行中... 得分: 0 | P0 G0 O0 M0")
         self._lane.start()
-        self._btn_start.setText("⏸ 进行中...")
+        self._btn_start.setText("▶ 进行中…")
         self._btn_start.setEnabled(False)
+        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setEnabled(True)
+        self._follow_timer.start()
+
+    def _on_follow_tick(self):
+        """演奏时周期性把当前拍喂给谱面 → 按小节自动跳转。"""
+        if not self._lane or not self._lane.playing or self._lane.paused:
+            return
+        if not (getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False)):
+            return
+        bpm = float(self._slider_bpm.value())
+        meter = getattr(self, "_imported_meter", "4/4") or "4/4"
+        beats_per_bar = int(meter.split("/")[0]) or 4
+        beat = self._lane._play_time * bpm / 60.0
+        bar = int(beat // beats_per_bar)
+        if bar == self._last_follow_bar:
+            return
+        self._last_follow_bar = bar
+        self._vexview.page().runJavaScript(
+            "if (typeof setFollow === 'function') setFollow(%s);" % round(beat, 2))
+
+    def _on_pause(self):
+        if not self._lane:
+            return
+        if self._lane.paused:
+            self._lane.resume()
+            self._btn_pause.setText("⏸ 暂停")
+            self._btn_start.setText("▶ 进行中…")
+            self._follow_timer.start()
+        else:
+            self._lane.pause()
+            self._btn_pause.setText("▶ 继续")
+            self._btn_start.setText("⏸ 已暂停")
+            self._follow_timer.stop()
+            self._stats.setText("⏸ 已暂停 — 点「继续」回到演奏")
 
     def _on_reset(self):
         if not self._lane:
@@ -710,7 +854,15 @@ class PracticePlugin(Plugin):
         self._lane.reset()
         self._btn_start.setText("▶ 开始")
         self._btn_start.setEnabled(True)
+        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setEnabled(False)
         self._stats.setText("已重置 — 选择练习 → 点开始")
+        self._clear_vex_highlight()
+        self._follow_timer.stop()
+        # 回到完整谱面视图
+        if getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False):
+            self._vexview.page().runJavaScript(
+                "if (typeof clearFollow === 'function') clearFollow();")
 
     def _on_judged(self, result: HitResult):
         h = self._lane._hits
@@ -720,6 +872,10 @@ class PracticePlugin(Plugin):
             self._stats.setText(
                 f"[{result.rating.upper()}] Δ{result.delta_ms:+.0f}ms → "
                 f"得分 {score:.0f} | P{h['perfect']} G{h['good']} O{h['ok']} M{h['miss']}")
+        # 谱面高亮刚判定的音符
+        color = {"perfect": "#22c55e", "good": "#3b82f6",
+                 "ok": "#f59e0b", "miss": "#ef4444"}.get(result.rating, "#fbbf24")
+        self._update_vex_highlight(result.note_id, color)
 
     def _on_finished(self):
         h = self._lane._hits
@@ -727,6 +883,9 @@ class PracticePlugin(Plugin):
         score = (h["perfect"] * 100 + h["good"] * 80 + h["ok"] * 50) / max(total, 1)
         self._btn_start.setText("▶ 开始")
         self._btn_start.setEnabled(True)
+        self._btn_pause.setText("⏸ 暂停")
+        self._btn_pause.setEnabled(False)
+        self._follow_timer.stop()
         self._stats.setText(f"✅ 练习结束！总分 {score:.0f}/100 — P{h['perfect']} G{h['good']} O{h['ok']} M{h['miss']}")
 
 
@@ -739,75 +898,158 @@ class PracticePlugin(Plugin):
         if not path:
             return
         try:
-            notes, bpm = self._parse_midi(path)
+            notes, bpm, key, meter, tracks = self._parse_midi(path)
         except Exception as e:
             self.log.error(f"MIDI 解析失败: {e}")
             return
-        self._apply_notes(notes, bpm)
+        self._apply_notes(notes, bpm, key, meter, tracks)
 
     @staticmethod
     def _parse_midi(path: str):
-        """解析 .mid 文件 → (List[PianoNote], bpm)。"""
+        """解析 .mid 文件 → (List[PianoNote], bpm, key, meter, tracks)。
+
+        tracks: 有序轨道名列表（如 ["Track 1", "melody"]），notes[i].track 引用它。
+        """
         mid = mido.MidiFile(path)
-        # 取 tempo 和 拍号（从 meta message）
+        # 取 tempo / 调号 / 拍号（从 meta message）
         bpm = 120.0
+        key = "C"
+        meter = "4/4"
         for msg in mido.merge_tracks(mid.tracks):
             if msg.type == 'set_tempo':
                 bpm = mido.tempo2bpm(msg.tempo)
-                break
+            elif msg.type == 'key_signature':
+                key = PracticePlugin._vex_key(msg.key)
+            elif msg.type == 'time_signature':
+                meter = f"{msg.numerator}/{msg.denominator}"
         # tick → 秒
         tpb = mid.ticks_per_beat
 
-        # 合并所有 track 的 note
-        active = {}  # channel → note → start_tick
-        raw = []     # (midi, start_sec, duration_sec, velocity)
-        for track in mid.tracks:
+        # 各轨道名（mido 的 track name meta 或按序号），重名时加序号后缀保证唯一
+        track_names = []
+        seen = {}
+        for i, tr in enumerate(mid.tracks):
+            name = f"Track {i + 1}"
+            for msg in tr:
+                if msg.type == 'track_name' and msg.name:
+                    name = msg.name
+                    break
+            if name in seen:
+                seen[name] += 1
+                name = f"{name} #{seen[name] + 1}"
+            else:
+                seen[name] = 1
+            track_names.append(name)
+
+        # 逐轨道解析 note（保留轨道归属）
+        raw = []     # (midi, start_sec, duration_sec, velocity, track_idx)
+        for ti, track in enumerate(mid.tracks):
             tick = 0
+            active = {}  # note → start_tick
             for msg in track:
-                if msg.type == 'set_tempo':
-                    tick += msg.time
-                    continue
+                tick += msg.time   # 先累加 delta，使 tick 指向本消息发生时
                 if msg.type == 'note_on' and msg.velocity > 0:
-                    start_tick = tick
-                    active.setdefault(msg.channel, {})[msg.note] = start_tick
+                    active[msg.note] = tick
                 elif msg.type == 'note_off' or (msg.type == 'note_on' and msg.velocity == 0):
-                    ch = msg.channel
-                    if ch in active and msg.note in active[ch]:
-                        st = active[ch].pop(msg.note)
+                    if msg.note in active:
+                        st = active.pop(msg.note)
                         sec_per_tick = mido.tick2second(1, tpb, mido.bpm2tempo(bpm))
                         start_sec = st * sec_per_tick
                         dur_sec = (tick - st) * sec_per_tick
-                        raw.append((msg.note, start_sec, max(0.1, dur_sec), 80))
-                tick += msg.time
+                        if dur_sec > 0:
+                            raw.append((msg.note, start_sec, dur_sec, 80, ti))
 
         raw.sort(key=lambda x: x[1])
         # 时间偏移到 0.5 秒开始（留 prep）
         t0 = raw[0][1] if raw else 0
         notes = [PianoNote(
-            id=i, midi=n, time=max(0.5, s - t0 + 0.5), duration=d, velocity=v
-        ) for i, (n, s, d, v) in enumerate(raw)]
-        return notes, bpm
+            id=i, midi=n, time=max(0.5, s - t0 + 0.5), duration=max(0.1, d),
+            velocity=v, track=track_names[ti],
+        ) for i, (n, s, d, v, ti) in enumerate(raw)]
+        return notes, bpm, key, meter, track_names
 
-    def _apply_notes(self, notes, bpm):
+    @staticmethod
+    def _vex_key(key_str: str) -> str:
+        """mido key_signature 字符串 → VexFlow 调号（小调 → 关系大调）。"""
+        s = (key_str or "C").strip()
+        minor = s.lower().endswith("min") or s.lower().endswith("m")
+        root = s.split()[0]
+        if minor and root[-1].lower() == "m":
+            root = root[:-1]
+        # MIDI 音名 → 半音数（同音异名统一归一）
+        name_map = {
+            "C": 0, "B#": 0, "C#": 1, "DB": 1, "D": 2, "D#": 3, "EB": 3,
+            "E": 4, "FB": 4, "F": 5, "E#": 5, "F#": 6, "GB": 6, "G": 7,
+            "G#": 8, "AB": 8, "A": 9, "A#": 10, "BB": 10, "B": 11, "CB": 11,
+        }
+        pc = name_map.get(root.upper(), 0)
+        if minor:
+            pc = (pc + 3) % 12   # 关系大调 = 小调根 + 小三度
+        # 黑键调号取 VexFlow 认识的常用拼写
+        names = {0: "C", 1: "Db", 2: "D", 3: "Eb", 4: "E", 5: "F",
+                 6: "F#", 7: "G", 8: "Ab", 9: "A", 10: "Bb", 11: "B"}
+        return names.get(pc, "C")
+
+    def _apply_notes(self, notes, bpm, key="C", meter="4/4", tracks=None):
         if not self._lane:
             return
         self._imported_notes = list(notes)  # 记住已导入的
         self._imported_bpm = bpm
+        self._imported_key = key
+        self._imported_meter = meter
+        self._imported_tracks = tracks or [n.track for n in notes]
         self._lane.set_notes(notes, bpm=bpm)
-        # 喂给 VexFlow
-        if self._vexview:
-            import json as _json
-            jp_notes = [{"midi": n.midi, "duration": n.duration} for n in notes]
-            # vexflow_jianpu.js 需要 CDN 加载；先尝试，失败就静默
-            js = f"try {{ render({{notes: {_json.dumps(jp_notes)}, clef:'treble', key:'C', meter:'4/4'}}); }} catch(e) {{ console.log('vexflow render failed:', e); }}"
+        self._render_score(notes, bpm, key, meter, tracks)
+        n_tracks = len(dict.fromkeys(tracks)) if tracks else 1
+        self._stats.setText(
+            f"📂 已导入 {len(notes)} 个音符 / {n_tracks} 轨道 @ {bpm:.0f} BPM — 点 ▶ 开始")
+
+    def _render_score(self, notes, bpm, key="C", meter="4/4", tracks=None):
+        """把练习音符喂给 VexFlow 谱面（含 time 用于小节切分、track 分行）。"""
+        if not getattr(self, "_vexview", None):
+            return
+        import json as _json
+        jp_notes = [{"midi": n.midi, "duration": n.duration,
+                     "time": n.time, "track": n.track} for n in notes]
+        payload = {"notes": jp_notes, "clef": "treble",
+                   "key": key, "meter": meter, "bpm": float(bpm)}
+        js = "render(%s);" % _json.dumps(payload)
+        mode_js = "setMode('%s');" % ("jianpu" if self._score_mode == "jianpu" else "treble")
+        if getattr(self, "_vex_ready", False):
             self._vexview.page().runJavaScript(js)
-        self._stats.setText(f"📂 已导入 {len(notes)} 个音符 @ {bpm:.0f} BPM — 点 ▶ 开始")
+            self._vexview.page().runJavaScript(mode_js)
+        else:
+            self._vex_pending = js + " " + mode_js   # loadFinished 后重放
+
+    def _on_score_mode_changed(self, index: int):
+        """谱面模式切换：五线谱 / 简谱。"""
+        self._score_mode = "jianpu" if index == 1 else "treble"
+        if getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False):
+            self._vexview.page().runJavaScript(
+                "setMode('%s');" % self._score_mode)
+
+    def _on_vex_loaded(self, ok: bool):
+        """VexFlow 页面加载完成后触发——重放缓存里的 render。"""
+        self._vex_ready = True
+        if not ok:
+            self.log.warning("谱面页面加载未完成")
+            return
+        if self._vex_pending:
+            js, self._vex_pending = self._vex_pending, None
+            self._vexview.page().runJavaScript(js)
+
+    def _vex_highlight_js(self, flat_index: int, color: str) -> str:
+        return (f"if (typeof highlightVf === 'function') "
+                f"highlightVf({int(flat_index)}, '{color}');")
 
     def _update_vex_highlight(self, flat_index: int, color: str = "#fbbf24"):
-        if self._vexview:
+        if getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False):
+            self._vexview.page().runJavaScript(self._vex_highlight_js(flat_index, color))
+
+    def _clear_vex_highlight(self):
+        if getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False):
             self._vexview.page().runJavaScript(
-                f"if (typeof highlightVf === 'function') highlightVf({flat_index}, '{color}');"
-            )
+                "if (typeof clearHighlight === 'function') clearHighlight();")
 
 
 def _note_name(midi: int) -> str:
