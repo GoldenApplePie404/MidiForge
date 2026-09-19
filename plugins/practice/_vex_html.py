@@ -172,19 +172,18 @@ function measureInRange(bar, range) {
 // ===== 统一几何 —— 唯一参数 S 控制谱面真实像素大小 =====
 // S = spacing_between_lines_px：glyph 在 SVG 里的真实像素，无缩放放大
 function geom(range) {
-  const S = 6;              // VexFlow spacing_between_lines_px：4=小, 5=中, 6=中+, 8=大, 10=默认
+  const S = 7;              // VexFlow spacing_between_lines_px：4=小, 5=中, 6=中+, 7=偏大, 8=大, 10=默认
   const STEM = 3.5 * S;     // stem 默认长度公式
   const STAVE_H = 4 * S;
   const PAD_H = Math.max(3, Math.round(S));
   const LINE_H = PAD_H + STAVE_H + STEM * 2 + Math.max(2, Math.round(S/2));
   const colsPerLine = range ? FOLLOW_WINDOW.before + 1 + FOLLOW_WINDOW.after : 8;
   const CLEF_W = Math.max(18, Math.round(28 * (S/6)));
-  // MEAS_W 算成：CLEF + cols*MEAS + right = 容器实际宽度（SVG 物理铺满，不缩放）
-  // 先拿到容器宽度；拿不到时先用占位，render 里再设
+  // MEAS_W = (容器宽 - CLEF - rightPad) / cols — 物理铺满不截断
   const wrapW = document.getElementById('wrap-tr').clientWidth || 720;
-  const rightPad = Math.max(12, Math.round(18 * (S/6)));
+  const rightPad = Math.max(10, Math.round(14 * (S/6)));
   const MEAS_W = Math.max(30, Math.floor((wrapW - CLEF_W - rightPad) / colsPerLine));
-  return { S, PAD_H, MEAS_W, CLEF_W, LINE_H, colsPerLine, rightPad };
+  return { S, PAD_H, MEAS_W, CLEF_W, LINE_H, colsPerLine };
 }
 
 // ===== 五线谱渲染 =====
@@ -212,16 +211,14 @@ function renderTreble() {
   const totalRows = trackRows.reduce((s, x) => s + x, 0);
   const totalH = g.PAD_H + totalRows * g.LINE_H + Math.round(12 * (g.S/6));
   const wrapW = document.getElementById('wrap-tr').clientWidth || 720;
-  // 居中：SVG 宽度 = 容器 - 两侧留白，靠 margin:0 auto 居中
-  const sidePad = Math.round(wrapW * 0.06);
-  const totalW = wrapW - sidePad * 2;
+  // SVG 物理宽 = 容器宽，MEAS_W 已按容器宽算，不会超出
+  const totalW = wrapW;
 
   const r = new Renderer(svg, Renderer.Backends.SVG);
   r.resize(totalW, totalH);
   svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
   svg.style.width = totalW + 'px';
   svg.style.height = totalH + 'px';
-  svg.style.margin = '0 auto';
   svg.removeAttribute('height');
   const ctx = r.getContext();
 
@@ -346,13 +343,11 @@ function renderJianpu() {
   const totalRows = trackRows.reduce((s, x) => s + x, 0);
   const totalH = g.PAD_H + totalRows * g.LINE_H + Math.round(10 * (g.S/6));
   const wrapW = document.getElementById('wrap-jp').clientWidth || 720;
-  const sidePad = Math.round(wrapW * 0.06);
-  const totalW = wrapW - sidePad * 2;
+  const totalW = wrapW;
 
   svg.setAttribute('viewBox', '0 0 ' + totalW + ' ' + totalH);
   svg.style.width = totalW + 'px';
   svg.style.height = totalH + 'px';
-  svg.style.margin = '0 auto';
   svg.removeAttribute('height');
 
   const jpFont = Math.round(22 * (g.S/10));
