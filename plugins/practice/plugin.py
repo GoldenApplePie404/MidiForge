@@ -151,6 +151,9 @@ class PianoLaneWidget(QWidget):
         self._track_colors: dict = {}
         self._track_order: list = []
 
+        # 模式: "auto"=自动下落（默认）, "semi"=半自动（弹对才推进）
+        self._mode = "auto"
+
         # 统计
         self._hits = {"perfect": 0, "good": 0, "ok": 0, "miss": 0}
         self._hit_count = 0
@@ -182,6 +185,15 @@ class PianoLaneWidget(QWidget):
     def track_color(self, name: str) -> str:
         """轨道名 → 颜色（含未登记的兜底）。"""
         return self._track_colors.get(name, self.NOTE_COLORS[""])
+
+    def set_mode(self, mode: str):
+        """切换模式: "auto" 或 "semi"。"""
+        if mode in ("auto", "semi"):
+            self._mode = mode
+
+    @property
+    def mode(self) -> str:
+        return self._mode
 
     def set_pixels_per_second(self, pps: float):
         """调飘速——越大飘越快。"""
@@ -241,10 +253,59 @@ class PianoLaneWidget(QWidget):
         self.update()
 
     def judge_note_on(self, midi_note: int) -> Optional[HitResult]:
-        """用户按下一个 MIDI note — 找判定线附近的匹配音符，返回判定结果。"""
+        """用户按下一个 MIDI note — 找判定线附近的匹配音符，返回判定结果。
+
+        semi 模式：找下一个该弹的音符（time 排序，第一个未判定且 time >= play_time），
+        弹对则推进 play_time 到该音符 time。
+        """
         if not self._playing or not self._notes:
             return None
 
+        # === 半自动模式 ===
+        if self._mode == "semi":
+            # 找下一个该弹的：按 time 排序，第一个未判定的
+            pending = sorted(
+                (n for n in self._notes if not n.rated),
+                key=lambda n: (n.time, n.id),
+            )
+            if not pending:
+                return None
+            target = pending[0]
+
+            if midi_note == target.midi:
+                # 弹对：推进 play_time 到这个音符，让下一个开始飘
+                self._play_time = target.time
+                # rating：半自动不看 timing，弹对就是 perfect
+                target.rated = True
+                target.rating = "perfect"
+                target.hit_delta_ms = 0.0
+                self._hits["perfect"] += 1
+                self._hit_count += 1
+                result = HitResult(
+                    note_id=target.id, midi=target.midi, delta_ms=0.0,
+                    rating="perfect", pitch_ok=True, at=self._play_time,
+                )
+                self._floats.append({
+                    'text': 'PERFECT', 'color': '#22c55e',
+                    'age_sec': 0.0, 'x_ratio': 0.5, 'base_y': self._judgment_line_y,
+                })
+                if self.on_judged:
+                    self.on_judged(result)
+                self.update()
+                return result
+            else:
+                # 弹错：不推进，仅记录 miss
+                self._hits["miss"] += 1
+                self._hit_count += 1
+                self._floats.append({
+                    'text': 'WRONG', 'color': '#ef4444',
+                    'age_sec': 0.0, 'x_ratio': 0.5, 'base_y': self._judgment_line_y,
+                })
+                self.update()
+                # 返回 None 让上层知道没匹配到（不是完全忽略）
+                return None
+
+        # === 自动模式：原有判定逻辑 ===
         # 找所有未判定 + 音高匹配 + 在判定窗口内的音符
         candidates = []
         for n in self._notes:
@@ -319,6 +380,29 @@ class PianoLaneWidget(QWidget):
                 self._play_time = 0.0
             return  # prep 阶段不走后面的判定/漏按
 
+        # 半自动模式：play_time 由正确按键驱动，timer 只刷新浮动特效 + 结束检查
+        if self._mode == "semi":
+            # 更新浮动分数特效
+            alive = []
+            for f in self._floats:
+                f['age_sec'] += dt
+                if f['age_sec'] < 1.2:
+                    alive.append(f)
+            self._floats = alive
+
+            # 检查是否结束
+            total_notes = len(self._notes)
+            all_rated = all(n.rated for n in self._notes) if self._notes else True
+            if all_rated and self._hit_count >= total_notes and total_notes > 0:
+                self._playing = False
+                self._timer.stop()
+                if self.on_finished:
+                    self.on_finished()
+
+            self.update()
+            return
+
+        # === 自动模式：正常推进 ===
         self._play_time += dt
 
         # 检查漏按：play_time 已经超过 note.time + MISS_WINDOW_MS 还没判定
@@ -617,7 +701,8 @@ class PracticePlugin(Plugin):
     """竖向钢琴帘练习 Plugin。"""
 
     name = "practice"
-    version = "0.1"
+    version = "0.2"
+    status = "dev"   # dev = 开发中
 
     def __init__(self):
         super().__init__()
@@ -685,6 +770,14 @@ class PracticePlugin(Plugin):
         self._combo_ex = QComboBox()
         self._combo_ex.addItems(list(DEMO_PRESETS.keys()))
         ctrl.addWidget(self._combo_ex)
+
+        ctrl.addSpacing(8)
+        ctrl.addWidget(QLabel("模式:"))
+        self._combo_mode = QComboBox()
+        self._combo_mode.addItems(["自动下落", "半自动识谱"])
+        self._combo_mode.setFixedWidth(110)
+        self._combo_mode.currentIndexChanged.connect(self._on_mode_changed)
+        ctrl.addWidget(self._combo_mode)
 
         ctrl.addSpacing(8)
         ctrl.addWidget(QLabel("谱面:"))
@@ -1027,6 +1120,15 @@ class PracticePlugin(Plugin):
         if getattr(self, "_vexview", None) and getattr(self, "_vex_ready", False):
             self._vexview.page().runJavaScript(
                 "setMode('%s');" % self._score_mode)
+
+    def _on_mode_changed(self, index: int):
+        """练习模式切换：0=自动下落, 1=半自动识谱。"""
+        mode = "semi" if index == 1 else "auto"
+        self._lane.set_mode(mode)
+        # 如果正在练习中，重置让新模式生效
+        if self._lane.playing or self._lane._prep_remaining_ms > 0:
+            self._on_reset()
+            self.log.info("模式已切换为 %s，请重新开始练习", mode)
 
     def _on_vex_loaded(self, ok: bool):
         """VexFlow 页面加载完成后触发——重放缓存里的 render。"""

@@ -46,6 +46,8 @@ class PluginHost:
                 if inst is None:
                     continue  # 未定义插件类：不记录，跳过
                 item["name"] = inst.name or item["name"]
+                item["version"] = getattr(inst, "version", "0.1")
+                item["status"] = getattr(inst, "status", "stable")
                 plugin = inst()
                 plugin.on_activate(app)
                 item["instance"] = plugin

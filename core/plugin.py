@@ -28,6 +28,9 @@ class Plugin(ABC):
     """
 
     name: str = ""
+    version: str = "0.1"
+    # status: "stable" 稳定 / "dev" 开发中 / "deprecated" 已废弃
+    status: str = "stable"
 
     def on_activate(self, app) -> None:
         """激活时调用。app 是 api.AppContext，提供 state/log/bindings/audio/clock/data_dir 等子 API。"""

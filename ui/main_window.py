@@ -1,4 +1,4 @@
-﻿from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
+from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
 from PyQt6.QtGui import QKeyEvent
 from PyQt6.QtWidgets import QMainWindow, QSplitter, QStatusBar, QTabWidget, QVBoxLayout, QWidget
 
@@ -78,7 +78,7 @@ class MainWindow(QMainWindow):
                 self.plugin_tabs.show_error(item["name"], f"面板构造失败: {exc}")
                 continue
             if panel is not None:
-                self.plugin_tabs.mount(item["name"], panel)
+                self.plugin_tabs.mount(item["name"], panel, item.get("status", "stable"))
         if self.plugin_tabs.count():
             self.tabs.addTab(self.plugin_tabs, "插件")
 
