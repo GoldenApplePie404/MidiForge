@@ -61,6 +61,82 @@ def test_send_missing_output_raises():
         eng.send_message("note_on", channel=0, note=60)
 
 
+def test_send_sysex_missing_output_raises():
+    eng = MidiEngine()
+    with pytest.raises(RuntimeError, match="未打开输出端口"):
+        eng.send_sysex([0x41, 0x10])
+
+
+def test_send_sysex_fake_output(monkeypatch):
+    captured = {}
+
+    class FakeOut:
+        def __init__(self, name):
+            self.name = name
+            self.sent = []
+
+        def send(self, msg):
+            self.sent.append(msg)
+
+        def close(self):
+            pass
+
+    def fake_factory(name, **kwargs):
+        port = FakeOut(name)
+        captured["port"] = port
+        return port
+
+    monkeypatch.setattr("mido.open_output", fake_factory)
+
+    eng = MidiEngine()
+    eng.open_output("fake-out")
+    eng.send_sysex([0x41, 0x10, 0x42, 0x12])
+
+    assert len(captured["port"].sent) == 1
+    msg = captured["port"].sent[0]
+    assert msg.type == "sysex"
+    # mido 的 sysex data 存储为 tuple
+    assert tuple(msg.data) == (0x41, 0x10, 0x42, 0x12)
+    # bytes() 自动带 F0/F7
+    assert msg.bytes()[0] == 0xF0 and msg.bytes()[-1] == 0xF7
+
+
+def test_send_sysex_invalid_data(monkeypatch):
+    class FakeOut:
+        def send(self, msg):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_factory(name, **kwargs):
+        return FakeOut()
+
+    monkeypatch.setattr("mido.open_output", fake_factory)
+
+    eng = MidiEngine()
+    eng.open_output("fake-out")
+    with pytest.raises(ValueError):
+        eng.send_sysex([])              # 空
+    with pytest.raises(ValueError):
+        eng.send_sysex([0x80])          # >0x7F
+    with pytest.raises(ValueError):
+        eng.send_sysex([0x41, -1])      # 负数
+
+
+def test_fingerprint_sysex_uses_raw_hex():
+    """方案A：sysex 指纹按 raw_hex 区分，避免多条 sysex 指纹碰撞。"""
+    from midi.parser import parse
+    p1 = parse(mido.Message("sysex", data=[0x41, 0x10, 0x01]))
+    p2 = parse(mido.Message("sysex", data=[0x41, 0x10, 0x02]))
+    assert MidiEngine._fingerprint(p1) != MidiEngine._fingerprint(p2)
+    assert MidiEngine._fingerprint(p1)[0] == "sysex"
+    # 非 sysex 指纹不受影响
+    pn = parse(mido.Message("note_on", channel=0, note=60, velocity=100))
+    fp = MidiEngine._fingerprint(pn)
+    assert fp == ("note_on", 0, (("note", 60), ("velocity", 100)))
+
+
 def test_receive_path_with_fake_port(monkeypatch):
     captured = {}
 

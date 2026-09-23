@@ -91,6 +91,20 @@ class MidiEngine:
         self._echoes.append(self._fingerprint(parsed))
         self._out_port.send(mid)
 
+    def send_sysex(self, data: List[int]) -> None:
+        """发送一条 SysEx 消息。data 为不含 F0/F7 的 payload 字节（0-127）。"""
+        if self._out_port is None:
+            raise RuntimeError("未打开输出端口")
+        if not data or any(not (0 <= b <= 127) for b in data):
+            raise ValueError("send_sysex data 必须是 0-127 的字节列表")
+        mid = mido.Message("sysex", data=bytes(data))
+        # 构造临时 ParsedMessage 取指纹（sysex 分支按 raw_hex 区分不同消息）
+        self._echoes.append(self._fingerprint(parse(mid)))
+        self._out_port.send(mid)
+
     @staticmethod
     def _fingerprint(parsed: ParsedMessage) -> tuple:
+        if parsed.type == "system" and parsed.values.get("raw_type") == "sysex":
+            # sysex 无 channel/values 差异，按原始 hex 指纹区分不同消息
+            return ("sysex", parsed.raw_hex)
         return (parsed.type, parsed.channel, tuple(sorted(parsed.values.items())))

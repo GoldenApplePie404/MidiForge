@@ -39,6 +39,10 @@ from core.matcher import Matcher
 from core.midi_file import _MidiFileService
 from midi.engine import MidiEngine
 from midi.parser import ParsedMessage
+from midi.sysex import (
+    classify, blacklist_hit, DEFAULT_BLACKLIST_ADDRS,
+    RISK_OK, RISK_WARN, RISK_HIGH, RANK_TEXT,
+)
 
 _DEFAULT_APP: Optional["AppContext"] = None
 
@@ -319,6 +323,60 @@ class AppContext:
     def send_midi(self, type_: str, channel: int = 0, **kwargs) -> None:
         self.engine.send_message(type_, channel=channel, **kwargs)
         self.bus.publish(TOPIC_SENT, {"type": type_, "channel": channel, "values": kwargs})
+
+    def send_sysex(self, data, *, safe: bool = True,
+                   blacklist: Optional[dict] = None) -> dict:
+        """发送 SysEx 消息，默认启用安全网关。
+
+        三道安全机制：
+          1. 黑名单 block=True 的条目 → 直接 raise RuntimeError（硬拦截）
+          2. RISK_HIGH 消息 → 记录 warning 日志 + TOPIC_SENT 里带风险信息，
+             但不拦截（因为二次确认是 UI 层职责，API 不知道运行时上下文）
+          3. safe=False → 完全绕过（开发者显式声明知道自己在做什么）
+
+        Args:
+            data: 不含 F0/F7 的 payload 字节列表（0-127）
+            safe: 默认 True。False = 绕过所有检查（危险，仅限调试/固件刷写）
+            blacklist: 可选，覆盖默认黑名单。None 时用内置 DEFAULT_BLACKLIST_ADDRS。
+
+        Returns:
+            dict: {"level": int, "reason": str, "blacklist_hit": dict|None, "sent": bool}
+
+        Raises:
+            RuntimeError: 命中黑名单 block=True 条目（safe=True 时）
+        """
+        level, reason, vendor_known = RISK_OK, "safe=False 绕过", False
+        hi = None
+
+        if safe:
+            level, reason, vendor_known = classify(list(data))
+            bl_cfg = blacklist if blacklist is not None else {
+                "enabled": True, "named_addresses": DEFAULT_BLACKLIST_ADDRS, "custom": []
+            }
+            hi = blacklist_hit(list(data), bl_cfg)
+            if hi and hi.get("block"):
+                raise RuntimeError(
+                    f"SysEx 命中非参数区黑名单，已禁发:\n{hi.get('reason', '')}\n"
+                    f"payload 前 8 字节: {' '.join(f'{b:02X}' for b in list(data)[:8])}..."
+                )
+            if level == RISK_HIGH:
+                self.log.warning(
+                    "发送高危 SysEx [%s]: %s — 请确认用户已知风险并授权",
+                    RANK_TEXT[level], reason)
+
+        self.engine.send_sysex(data)
+
+        info = {
+            "type": "sysex",
+            "data": list(data),
+            "level": level,
+            "reason": reason,
+            "risk": RANK_TEXT.get(level, "?"),
+            "blacklist_hit": hi,
+            "safe": safe,
+        }
+        self.bus.publish(TOPIC_SENT, info)
+        return info
 
     # ---- 动作执行 ----
 
