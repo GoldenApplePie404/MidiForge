@@ -22,7 +22,8 @@ import pygame
 from PyQt6.QtCore import QTimer, Qt, pyqtProperty
 from PyQt6.QtGui import QColor
 from PyQt6.QtWidgets import (
-    QCheckBox, QFrame, QGridLayout, QHBoxLayout, QLabel, QSlider, QVBoxLayout, QWidget
+    QCheckBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QInputDialog,
+    QLabel, QMenu, QMessageBox, QSlider, QVBoxLayout, QWidget
 )
 
 from core.plugin import Plugin
@@ -35,7 +36,14 @@ DEFAULT_CONFIG = {
     "cc_range": [102, 109],
     "volume": 0.75,
     "enabled": True,
+    # pedal_kick: 是否让备选 CC（延音踏板 CC64）也打底鼓。
+    # 弹钢琴时关掉 → 踏板只做延音，不会误触发底鼓。
+    "pedal_kick": True,
     "pad_pulse_ms": 300,
+    # pads[].alt_cc（可选）：备选触发 CC。典型用法是延音踏板（CC64）——
+    # 踩下发 127、松开发 0，配合 _on_cc 里的 val<=0 过滤即为"踩一下响一下"。
+    # pads[].volume（可选，0.0~1.0）：该 pad 的独立音量，与总音量相乘，默认 1.0。
+    # pads[].custom_wav（可选）：用户自选采样的原路径，存在时优先于内置 wav。
     "pads": [
         {"cc": 102, "name": "吊镲",     "wav": "pad1_crash.wav"},
         {"cc": 103, "name": "通鼓(左)", "wav": "pad2_tom_left.wav"},
@@ -44,7 +52,7 @@ DEFAULT_CONFIG = {
         {"cc": 106, "name": "闭镲",     "wav": "pad5_hihat_closed.wav"},
         {"cc": 107, "name": "开镲",     "wav": "pad6_hihat_open.wav"},
         {"cc": 108, "name": "军鼓",     "wav": "pad7_snare.wav"},
-        {"cc": 109, "name": "底鼓",     "wav": "pad8_kick.wav"},
+        {"cc": 109, "name": "底鼓",     "wav": "pad8_kick.wav", "alt_cc": 64},
     ],
 }
 
@@ -122,8 +130,14 @@ class _PadButton(QFrame):
         self.name_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.name_label.setStyleSheet(f"color: {QSS.MUTED}; font-size: 10px;")
 
+        # 独立音量标记：100% 时留空，只有调过才显示，避免视觉噪音
+        self.vol_label = QLabel("")
+        self.vol_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.vol_label.setStyleSheet(f"color: {QSS.ACCENT}; font-size: 9px;")
+
         layout.addWidget(self.id_label)
         layout.addWidget(self.name_label)
+        layout.addWidget(self.vol_label)
         layout.addStretch(1)
 
     @pyqtProperty(float)
@@ -162,6 +176,10 @@ class _PadButton(QFrame):
         if self._brightness <= 0:
             self._timer.stop()
 
+    def set_volume_pct(self, pct: int):
+        """显示该 pad 的独立音量（100% 时留空）。"""
+        self.vol_label.setText("" if pct == 100 else f"{pct}%")
+
 
 class PadSentry(Plugin):
     """2×4 打击垫插件主类。
@@ -180,7 +198,7 @@ class PadSentry(Plugin):
     """
 
     name = "pad_sentry"
-    version = "1.0"
+    version = "1.3"
     description = "2x4 打击垫可视化网格，踩 pad 发光 + 内置 GM 鼓组采样发声"
 
     def on_activate(self, app):
@@ -195,6 +213,12 @@ class PadSentry(Plugin):
 
         self.config = self._load_config()
         self._pad_map = {p["cc"]: p for p in self.config["pads"]}
+        # 备选触发 CC → pad（如延音踏板 CC64 → 底鼓）
+        self._alt_map = {}
+        for pad in self.config["pads"]:
+            alt = pad.get("alt_cc")
+            if alt is not None:
+                self._alt_map[alt] = pad
 
         # ---- 用宿主统一音频服务 ----
         # 宿主统一管理 pygame.mixer.init()，多插件共存不会冲突。
@@ -204,19 +228,15 @@ class PadSentry(Plugin):
 
         audio = app.audio
         audio.init_if_needed()                                 # 宿主统一 init
+        if not audio.inited:
+            # 后端没起来时，下面每个 pad 都会报"采样加载失败"——先把根因说清楚
+            self.log.warning("音频后端初始化失败，采样无法播放：%s", audio.last_error)
         audio.allocate_pool("pad_sentry", channel_count=total)  # 独占池
 
         # 预加载 sfx 到宿主音频服务（全局音量自动生效）
         self._sfx = {}  # cc → _SfxHandle
         for pad in self.config["pads"]:
-            wav_path = self._samples_dir / pad["wav"]
-            if wav_path.exists():
-                sfx = audio.load(str(wav_path))
-                if sfx is not None:
-                    self._sfx[pad["cc"]] = sfx
-                    self.log.info("loaded %s (%.2fs)", wav_path.name, sfx.duration)
-                else:
-                    self.log.warning("load failed: %s", wav_path.name)
+            self._load_pad_sfx(pad)
 
         # ---- 订阅细分 topic（宿主已按 type 过滤，直接拿到 cc 类型消息）----
         app.subscribe("midi.cc", self._on_cc)
@@ -228,31 +248,61 @@ class PadSentry(Plugin):
         if self.app:
             self.app.audio.release_pool("pad_sentry")
 
+    # ---- 采样加载 ----
+    def _resolve_wav_path(self, pad) -> Path:
+        """pad 的采样路径：custom_wav（用户自选）优先，否则用内置 samples/ 里的 wav。"""
+        custom = pad.get("custom_wav")
+        if custom:
+            return Path(custom)
+        return self._samples_dir / pad["wav"]
+
+    def _load_pad_sfx(self, pad) -> bool:
+        """加载/重载某个 pad 的采样；失败时清掉该 pad 的句柄并返回 False。"""
+        path = self._resolve_wav_path(pad)
+        if not path.exists():
+            self._sfx.pop(pad["cc"], None)
+            self.log.warning("采样缺失: %s", path)
+            return False
+        sfx = self.app.audio.load(str(path))
+        if sfx is None:
+            self._sfx.pop(pad["cc"], None)
+            self.log.warning("采样加载失败: %s", path)
+            return False
+        self._sfx[pad["cc"]] = sfx
+        self.log.info("loaded %s (%.2fs)", path.name, sfx.duration)
+        return True
+
     # ---- 消息处理 ----
     def _on_cc(self, parsed):
         """EventBus 回调：宿主已按 topic=midi.cc 过滤，进来的都是 CC 消息。
 
-        只响应 value > 0（松开忽略）+ cc 号在 pad_map 范围内的。
+        只响应 value > 0（松开忽略）+ cc 号命中主 CC 或备选 CC（如踏板）。
         """
         cc = parsed.values.get("control")
         val = parsed.values.get("value", 0)
-        if cc not in self._pad_map:
-            return
         if val <= 0:
             return
+        pad = self._pad_map.get(cc)
+        if pad is None:
+            # 备选 CC（延音踏板）路径：受 pedal_kick 开关控制，
+            # 弹钢琴时关掉就不会误触发底鼓。
+            if not self.config.get("pedal_kick", True):
+                return
+            pad = self._alt_map.get(cc)
+            if pad is None:
+                return
 
-        pad = self._pad_map[cc]
-
-        # UI：找到对应的 _PadButton 做脉冲发光
-        pad_btn = getattr(self, "_pad_btns", {}).get(cc)
+        # UI：找到对应的 _PadButton 做脉冲发光（按 pad 的主 CC 索引）
+        pad_btn = getattr(self, "_pad_btns", {}).get(pad["cc"])
         if pad_btn is not None:
             pad_btn.pulse(self.config.get("pad_pulse_ms", 300))
 
-        # 音频：交给宿主统一服务 round-robin 播放
+        # 音频：交给宿主统一服务 round-robin 播放（按 pad 的主 CC 索引）
         if self.config.get("enabled", True):
-            sfx = self._sfx.get(cc)
+            sfx = self._sfx.get(pad["cc"])
             if sfx is not None:
-                volume = self.config.get("volume", 0.75)
+                # 最终音量 = 总音量 × 该 pad 的独立音量
+                volume = self.config.get("volume", 0.75) * pad.get("volume", 1.0)
                 self.app.audio.play(
                     sfx, plugin_name="pad_sentry", volume=volume
                 )
@@ -271,7 +321,10 @@ class PadSentry(Plugin):
         root.addWidget(title)
 
         rng = self.config.get("cc_range", [0, 0])
-        hint = QLabel(f"监听 CC #{rng[0]}~#{rng[1]}（共 {len(self.config['pads'])} 个 pad） · 内置 GM 鼓组")
+        hint_text = f"监听 CC #{rng[0]}~#{rng[1]}（共 {len(self.config['pads'])} 个 pad）"
+        for alt_cc, alt_pad in sorted(self._alt_map.items()):
+            hint_text += f" · 踏板 CC#{alt_cc} → {alt_pad['name']}"
+        hint = QLabel(hint_text + " · 内置 GM 鼓组")
         hint.setStyleSheet(f"color: {QSS.MUTED}; font-size: 11px;")
         root.addWidget(hint)
 
@@ -281,6 +334,12 @@ class PadSentry(Plugin):
         self._pad_btns = {}
         for i, pad in enumerate(self.config["pads"]):
             btn = _PadButton(f"Pad {i + 1}", pad["name"])
+            btn.set_volume_pct(int(pad.get("volume", 1.0) * 100))
+            # 右键菜单：换采样 / 调独立音量 / 恢复默认
+            btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            btn.customContextMenuRequested.connect(
+                lambda pos, p=pad, b=btn: self._pad_menu(p, b, pos)
+            )
             self._pad_btns[pad["cc"]] = btn
             grid_wrap.addWidget(btn, i // 4, i % 4)
 
@@ -296,6 +355,15 @@ class PadSentry(Plugin):
         self.enable_cb.setStyleSheet(f"color: {QSS.TEXT};")
         self.enable_cb.toggled.connect(self._toggle_sound)
         ctrl.addWidget(self.enable_cb)
+
+        # 踏板开关：关掉后延音踏板只做延音，不再模拟底鼓
+        if self._alt_map:
+            self.pedal_cb = QCheckBox("踏板打底鼓")
+            self.pedal_cb.setChecked(self.config.get("pedal_kick", True))
+            self.pedal_cb.setStyleSheet(f"color: {QSS.TEXT};")
+            self.pedal_cb.setToolTip("关闭后延音踏板恢复纯延音用途，不会触发底鼓")
+            self.pedal_cb.toggled.connect(self._toggle_pedal_kick)
+            ctrl.addWidget(self.pedal_cb)
 
         ctrl.addSpacing(16)
 
@@ -320,11 +388,10 @@ class PadSentry(Plugin):
         root.addLayout(ctrl)
 
         # 采样就绪提示（loaded/total），能直观看到哪些 wav 缺失
-        loaded = len(self._sfx)
-        total = len(self.config["pads"])
-        status = QLabel(f"采样就绪 {loaded}/{total}")
-        status.setStyleSheet(f"color: {QSS.MUTED}; font-size: 10px;")
-        root.addWidget(status)
+        self._status_label = QLabel()
+        self._status_label.setStyleSheet(f"color: {QSS.MUTED}; font-size: 10px;")
+        root.addWidget(self._status_label)
+        self._refresh_status()
 
         return box
 
@@ -333,13 +400,97 @@ class PadSentry(Plugin):
         self.config["enabled"] = on
         self._save_config()
 
+    def _toggle_pedal_kick(self, on: bool):
+        """踏板 → 底鼓 开关：关掉后踏板恢复纯延音用途。"""
+        self.config["pedal_kick"] = on
+        self._save_config()
+
     def _on_volume(self, v: int):
+        """总音量。播放时实时读 config["volume"]（见 _on_cc），所以只需改配置。
+
+        注意：_SfxHandle 只有 play()/stop()，没有 set_volume()，
+        之前这里遍历调用 set_volume 会抛 AttributeError 卡死事件循环。
+        """
         self.config["volume"] = v / 100.0
         self.vol_val.setText(f"{v}%")
-        # 所有已加载的 Sound 统一调音量
-        for sfx in self._sfx.values():
-            sfx.set_volume(self.config["volume"])
         self._save_config()
+
+    # ---- pad 右键菜单 ----
+    def _pad_menu(self, pad, btn, pos) -> None:
+        """右键 pad：换采样 / 调独立音量 / 恢复默认采样。"""
+        pct = int(pad.get("volume", 1.0) * 100)
+        menu = QMenu(btn)
+        act_sample = menu.addAction("更换采样…")
+        act_volume = menu.addAction(f"调整音量…（当前 {pct}%）")
+        menu.addSeparator()
+        act_reset = menu.addAction("恢复默认采样")
+        act_reset.setEnabled(bool(pad.get("custom_wav")))
+
+        chosen = menu.exec(btn.mapToGlobal(pos))
+        if chosen is act_sample:
+            self._change_sample(pad, btn)
+        elif chosen is act_volume:
+            self._adjust_pad_volume(pad, btn)
+        elif chosen is act_reset:
+            self._reset_sample(pad)
+
+    def _change_sample(self, pad, btn) -> None:
+        """选一个音频文件替换该 pad 的采样（引用原路径，不动用户文件）。"""
+        if pad.get("custom_wav"):
+            start_dir = str(Path(pad["custom_wav"]).parent)
+        else:
+            start_dir = str(self._samples_dir)
+        path, _ = QFileDialog.getOpenFileName(
+            btn, f"{pad['name']} — 选择采样", start_dir, "音频文件 (*.wav *.ogg)"
+        )
+        if not path:
+            return
+        old = pad.get("custom_wav")
+        pad["custom_wav"] = path
+        if not self._load_pad_sfx(pad):
+            # 加载失败则回滚，避免坏路径留在配置里
+            if old:
+                pad["custom_wav"] = old
+            else:
+                pad.pop("custom_wav", None)
+            self._load_pad_sfx(pad)
+            QMessageBox.warning(btn, "采样加载失败",
+                                f"无法加载：\n{path}\n\n已保留原采样。")
+            return
+        self._save_config()
+        self._refresh_status()
+
+    def _adjust_pad_volume(self, pad, btn) -> None:
+        """调该 pad 的独立音量（与总音量相乘）。"""
+        cur = int(pad.get("volume", 1.0) * 100)
+        val, ok = QInputDialog.getInt(
+            btn, f"{pad['name']} — 独立音量", "音量 %：", cur, 0, 100, 5
+        )
+        if not ok:
+            return
+        pad["volume"] = val / 100.0
+        self._pad_btns[pad["cc"]].set_volume_pct(val)
+        self._save_config()
+
+    def _reset_sample(self, pad) -> None:
+        """清掉自选采样，回到内置采样。"""
+        pad.pop("custom_wav", None)
+        self._load_pad_sfx(pad)
+        self._save_config()
+        self._refresh_status()
+
+    def _refresh_status(self) -> None:
+        """刷新采样就绪状态，并提示右键可编辑。"""
+        total = len(self.config["pads"])
+        loaded = len(self._sfx)
+        custom = sum(1 for p in self.config["pads"] if p.get("custom_wav"))
+        text = f"采样就绪 {loaded}/{total}"
+        if custom:
+            text += f" · 自选采样 {custom} 个"
+        if loaded == 0 and self.app is not None and not self.app.audio.inited:
+            text += f" · 音频后端未就绪：{self.app.audio.last_error}"
+        text += " · 右键 pad 可换采样 / 调独立音量"
+        self._status_label.setText(text)
 
     # ---- 配置持久化 ----
     def _load_config(self) -> dict:

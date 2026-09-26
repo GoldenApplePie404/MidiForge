@@ -3,8 +3,9 @@
     102,
     109
   ],
-  "volume": 0.37,
+  "volume": 0.73,
   "enabled": true,
+  "pedal_kick": false,
   "pad_pulse_ms": 300,
   "pads": [
     {
@@ -25,7 +26,8 @@
     {
       "cc": 105,
       "name": "吊镲",
-      "wav": "707 Crash.wav"
+      "wav": "707 Crash.wav",
+      "volume": 0.3
     },
     {
       "cc": 106,
@@ -45,7 +47,9 @@
     {
       "cc": 109,
       "name": "底鼓",
-      "wav": "GSReal Kick.wav"
+      "wav": "GSReal Kick.wav",
+      "alt_cc": 64,
+      "volume": 1.0
     }
   ]
 }
