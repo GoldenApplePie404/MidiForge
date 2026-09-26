@@ -16,3 +16,9 @@ test_script/
 
 # 用户采样备份（纯运行时生成的安全副本）
 plugins/pad_sentry/samples_backup/
+
+# 运行时产物（程序自动生成，不入库）
+debug.log
+.superpowers/
+plugins/sysex_editor/data/
+plugins/synth/config.json
