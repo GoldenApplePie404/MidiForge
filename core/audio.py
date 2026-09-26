@@ -15,6 +15,7 @@
             audio.set_master_volume(0.8)    # 全局音量
 """
 
+import os
 import threading
 from pathlib import Path
 from typing import Optional
@@ -61,6 +62,8 @@ class _AudioService:
         self._inited = False
         self._lock = threading.Lock()
         self._master_volume = 1.0
+        # 初始化失败的真实原因（空串=正常）。UI/日志用它替代"静默失败"。
+        self.last_error = ""
         # 按插件名分组的 channel 池状态
         self._pools: dict = {}  # plugin_name → {"base": int, "count": int, "idx": int}
         # 下一个可用的 base channel（避免池重叠）
@@ -69,21 +72,48 @@ class _AudioService:
     # ---- 初始化 ----
 
     def init_if_needed(self) -> bool:
-        """延迟初始化——pygame 不在也不会崩。"""
+        """延迟初始化——pygame 不在也不会崩。
+
+        依次尝试三档配置，失败原因写进 last_error：
+            1. 默认驱动（WASAPI，音质最好）
+            2. WinMM（waveOut）
+            3. DirectSound
+        为什么需要后面两档：实测本机 SDL 的 WASAPI 后端稳定失败
+        （"WASAPI can't initialize audio client"），不降级的话 pad_sentry 这类
+        插件会全军覆没，且只会看到一堆含糊的"采样加载失败"。
+        WinMM 排在 DirectSound 之前是因为实测：WinMM 初始化后 PortAudio
+        （synth 插件用的）仍能正常开 MME 流，而 DirectSound 会把输出设备占住，
+        导致 PortAudio 的 MME/WASAPI 全部开不了流——两败俱伤。
+        """
         if self._inited:
             return True
         if not _PYGAME_AVAILABLE:
+            self.last_error = "pygame 不可用"
             return False
         with self._lock:
             if self._inited:
                 return True
-            try:
-                pygame.mixer.init(self._sample_rate, -16, 2, self._buffer)
-                pygame.mixer.set_num_channels(self._channels)
+            errors = []
+            for driver in ("", "winmm", "directsound"):
+                try:
+                    pygame.mixer.quit()
+                except Exception:
+                    pass
+                if driver:
+                    os.environ["SDL_AUDIODRIVER"] = driver
+                else:
+                    os.environ.pop("SDL_AUDIODRIVER", None)
+                try:
+                    pygame.mixer.init(self._sample_rate, -16, 2, self._buffer)
+                    pygame.mixer.set_num_channels(self._channels)
+                except Exception as exc:
+                    errors.append(f"{driver or 'default'}: {exc}")
+                    continue
                 self._inited = True
+                self.last_error = ""
                 return True
-            except Exception:
-                return False
+            self.last_error = " | ".join(errors)
+            return False
 
     @property
     def inited(self) -> bool:
