@@ -5,7 +5,7 @@ from midi.parser import ParsedMessage
 
 
 class Matcher:
-    """把 MIDI 事件或按键映射为命中的信号集合。"""
+    """把 MIDI 事件或按键映射为命中的信号集合。停用（enabled=False）的绑定不参与匹配。"""
 
     def __init__(self, config: BindingConfig):
         self._config = config
@@ -15,6 +15,8 @@ class Matcher:
             return set()  # 转发的消息不再触发绑定，防止无限循环
         hits = set()
         for b in self._config.bindings:
+            if not b.enabled:
+                continue
             if any(_source_matches_parsed(s, parsed) for s in b.sources):
                 hits.add(b.signal)
         return hits
@@ -23,6 +25,8 @@ class Matcher:
         key = key.lower()
         hits = set()
         for b in self._config.bindings:
+            if not b.enabled:
+                continue
             if any(_source_matches_key(s, key) for s in b.sources):
                 hits.add(b.signal)
         return hits

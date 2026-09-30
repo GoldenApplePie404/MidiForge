@@ -68,3 +68,22 @@ def test_config_bindings_must_be_dict():
 
 def test_binding_virtual_midi_empty_dict_serialized():
     assert Binding(signal="x", sources=[], virtual_midi={}).to_dict()["virtual_midi"] == {}
+
+
+def test_binding_enabled_defaults_true_and_omitted():
+    """默认启用；启用态不写进 JSON，保持旧配置文件干净。"""
+    b = Binding(signal="x", sources=[])
+    assert b.enabled is True
+    assert "enabled" not in b.to_dict()
+
+
+def test_binding_disabled_roundtrip():
+    b = Binding(signal="x", sources=[], enabled=False)
+    assert b.to_dict()["enabled"] is False
+    assert Binding.from_dict(b.to_dict()).enabled is False
+
+
+def test_binding_old_config_without_enabled_is_enabled():
+    """旧配置（无 enabled 字段）读进来必须是启用态，无需迁移。"""
+    b = Binding.from_dict({"signal": "x", "sources": [{"type": "midi", "cc": 21}]})
+    assert b.enabled is True

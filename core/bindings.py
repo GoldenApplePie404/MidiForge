@@ -45,6 +45,7 @@ class Binding:
     sources: list = field(default_factory=list)
     virtual_midi: Optional[dict] = None
     key_out: Optional[dict] = None  # {"key": "f1"} 或 {"key": "ctrl+k"}
+    enabled: bool = True            # False = 停用：不参与匹配、不执行动作
 
     @classmethod
     def from_dict(cls, d: dict) -> "Binding":
@@ -56,6 +57,7 @@ class Binding:
             sources=[BindingSource.from_dict(s) for s in d.get("sources", [])],
             virtual_midi=d.get("virtual_midi"),
             key_out=d.get("key_out"),
+            enabled=bool(d.get("enabled", True)),
         )
 
     def to_dict(self) -> dict:
@@ -64,6 +66,9 @@ class Binding:
             d["virtual_midi"] = self.virtual_midi
         if self.key_out is not None:
             d["key_out"] = self.key_out
+        if not self.enabled:
+            # 只在停用时落盘，旧配置文件（无该字段）读进来即启用，无需迁移
+            d["enabled"] = False
         return d
 
 

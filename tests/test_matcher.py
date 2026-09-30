@@ -50,3 +50,28 @@ def test_keyboard_key_normalized():
     cfg = make_config([{"type": "keyboard", "key": "Left"}])
     m = Matcher(cfg)
     assert m.signals_for_key("left") == {"sig"}
+
+
+def test_disabled_binding_not_matched_midi():
+    """停用的绑定不再监听它绑定的 MIDI 按键。"""
+    cfg = make_config([{"type": "midi", "event": "note_on", "channel": 9, "note": 36}])
+    cfg.bindings[0].enabled = False
+    m = Matcher(cfg)
+    assert m.signals_for_parsed(ParsedMessage(type="note_on", channel=9, values={"note": 36})) == set()
+
+
+def test_disabled_binding_not_matched_key():
+    cfg = make_config([{"type": "keyboard", "key": "space"}])
+    cfg.bindings[0].enabled = False
+    m = Matcher(cfg)
+    assert m.signals_for_key("space") == set()
+
+
+def test_reenable_binding_matches_again():
+    cfg = make_config([{"type": "midi", "event": "cc", "cc": 21}])
+    cfg.bindings[0].enabled = False
+    m = Matcher(cfg)
+    parsed = ParsedMessage(type="cc", channel=0, values={"control": 21, "value": 127})
+    assert m.signals_for_parsed(parsed) == set()
+    cfg.bindings[0].enabled = True
+    assert m.signals_for_parsed(parsed) == {"sig"}

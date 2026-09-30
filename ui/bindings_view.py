@@ -2,7 +2,7 @@ import json
 from typing import Optional
 
 from PyQt6.QtCore import QEvent, QTimer, Qt
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QBrush, QColor, QKeyEvent
 from PyQt6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                              QFormLayout, QFrame, QHBoxLayout, QHeaderView,
                              QLabel, QLineEdit, QMessageBox, QPushButton,
@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (QComboBox, QDialog, QDialogButtonBox, QFileDialog,
                              QVBoxLayout, QWidget)
 
 from core.bindings import Binding, BindingConfig, BindingSource
+from ui import style_qss as QSS
 
 
 # 匹配用的 MIDI 事件类型下拉选项
@@ -605,6 +606,7 @@ class BindingEditDialog(QDialog):
             sources=[BindingSource.from_dict(s.to_dict()) for s in self._sources],
             virtual_midi=vm,
             key_out=key_out,
+            enabled=self._binding.enabled,   # 编辑不改动启用状态，开关在列表里控制
         )
         self.accept()
 
@@ -620,6 +622,7 @@ class BindingsView(QFrame):
         self.setObjectName("panel")
         self._config = config
         self._app = None  # 可由外部注入
+        self._loading = False  # True = 正在重建表格，屏蔽 itemChanged
 
         root = QVBoxLayout(self)
 
@@ -639,16 +642,20 @@ class BindingsView(QFrame):
             bar.addWidget(w)
         root.addLayout(bar)
 
-        # 表格：第 0 列 checkbox，1=信号名，2=匹配源，3=动作
-        self.table = QTableWidget(0, 4)
-        self.table.setHorizontalHeaderLabels(("✓", "信号名", "匹配源", "触发后动作"))
+        # 表格：0=启用开关，1=行选择（批量删除用），2=信号名，3=匹配源，4=动作
+        self.table = QTableWidget(0, 5)
+        self.table.setHorizontalHeaderLabels(("启用", "选", "信号名", "匹配源", "触发后动作"))
+        self.table.horizontalHeaderItem(0).setToolTip("勾选 = 启用该绑定；取消后不再监听它绑定的按键")
+        self.table.horizontalHeaderItem(1).setToolTip("勾选若干行后按「删除」可批量删除")
         self.table.setAlternatingRowColors(True)
         self.table.verticalHeader().setVisible(False)
         self.table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        for c in (1, 2, 3):
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        for c in (2, 3, 4):
             self.table.horizontalHeader().setSectionResizeMode(c, QHeaderView.ResizeMode.Stretch)
         self.table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.table.doubleClicked.connect(lambda _: self._edit_row())
+        self.table.itemChanged.connect(self._on_item_changed)
         root.addWidget(self.table)
 
         self.add_btn.clicked.connect(self._add_row)
@@ -665,26 +672,62 @@ class BindingsView(QFrame):
 
     # ---- 展示 ----
     def _rebuild(self) -> None:
-        self.table.setRowCount(0)
-        for b in self._config.bindings:
-            r = self.table.rowCount()
-            self.table.insertRow(r)
-            # 第 0 列：checkbox
-            cb = QTableWidgetItem()
-            cb.setFlags(cb.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            cb.setCheckState(Qt.CheckState.Unchecked)
-            cb.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-            self.table.setItem(r, 0, cb)
-            # 第 1-3 列：内容
-            self.table.setItem(r, 1, QTableWidgetItem(b.signal))
-            self.table.setItem(r, 2, QTableWidgetItem(" 或  ".join(_source_desc(s) for s in b.sources)))
-            self.table.setItem(r, 3, QTableWidgetItem(_action_desc(b)))
+        self._loading = True          # 重建期间屏蔽 itemChanged，避免误写配置
+        try:
+            self.table.setRowCount(0)
+            for b in self._config.bindings:
+                r = self.table.rowCount()
+                self.table.insertRow(r)
+                # 第 0 列：启用开关
+                en = QTableWidgetItem()
+                en.setFlags(Qt.ItemFlag.ItemIsUserCheckable | Qt.ItemFlag.ItemIsEnabled
+                            | Qt.ItemFlag.ItemIsSelectable)
+                en.setCheckState(Qt.CheckState.Checked if b.enabled else Qt.CheckState.Unchecked)
+                en.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(r, 0, en)
+                # 第 1 列：批量删除用的行选择框
+                cb = QTableWidgetItem()
+                cb.setFlags(cb.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                cb.setCheckState(Qt.CheckState.Unchecked)
+                cb.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.table.setItem(r, 1, cb)
+                # 第 2-4 列：内容
+                self.table.setItem(r, 2, QTableWidgetItem(b.signal))
+                self.table.setItem(r, 3, QTableWidgetItem(" 或  ".join(_source_desc(s) for s in b.sources)))
+                self.table.setItem(r, 4, QTableWidgetItem(_action_desc(b)))
+                self._style_row(r, b.enabled)
+        finally:
+            self._loading = False
+
+    def _style_row(self, row: int, enabled: bool) -> None:
+        """停用的行内容灰化，一眼看出哪些绑定还在生效。"""
+        color = QColor(QSS.TEXT if enabled else QSS.MUTED)
+        for col in (2, 3, 4):
+            item = self.table.item(row, col)
+            if item is not None:
+                item.setForeground(QBrush(color))
+
+    def _on_item_changed(self, item: QTableWidgetItem) -> None:
+        """「启用」开关被点击：写回配置并落盘。
+
+        matcher 与视图共用同一个 BindingConfig 对象，所以改完立即生效，
+        不需要重启或重新载入。
+        """
+        if self._loading or item.column() != 0:
+            return
+        row = item.row()
+        if not (0 <= row < len(self._config.bindings)):
+            return
+        b = self._config.bindings[row]
+        b.enabled = item.checkState() == Qt.CheckState.Checked
+        self._style_row(row, b.enabled)
+        self._save()
 
     def _selected_rows(self) -> list:
-        """返回所有勾选的行索引。"""
+        """返回所有勾选了「选」的行索引。"""
         rows = []
         for r in range(self.table.rowCount()):
-            cb = self.table.item(r, 0)
+            cb = self.table.item(r, 1)
             if cb and cb.checkState() == Qt.CheckState.Checked:
                 rows.append(r)
         return rows
@@ -722,6 +765,11 @@ class BindingsView(QFrame):
             QMessageBox.information(self, "提示", "测试触发需要先让工具处于运行状态（请先启动 GUI）")
             return
         b = self._config.bindings[idx]
+        if not b.enabled:
+            QMessageBox.information(self, "绑定已停用",
+                                    f"绑定 '{b.signal}' 处于停用状态，不参与匹配。\n"
+                                    f"请先在列表里勾选它的「启用」开关再测试。")
+            return
         try:
             self._app.execute_actions({b.signal})
             QMessageBox.information(self, "测试成功", f"信号 '{b.signal}' 的动作已执行")
@@ -746,7 +794,7 @@ class BindingsView(QFrame):
             idx = self._current_binding_idx()
             if idx < 0:
                 return
-            signal = self.table.item(idx, 1).text()
+            signal = self.table.item(idx, 2).text()
             if QMessageBox.question(self, "确认", f"删除信号 '{signal}' 及其所有源?",
                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No) \
                     != QMessageBox.StandardButton.Yes:

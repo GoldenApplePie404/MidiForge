@@ -387,6 +387,8 @@ class AppContext:
 
         executed = []
         for b in self.config.bindings:
+            if not b.enabled:
+                continue  # 停用的绑定任何路径都不执行（含 trigger_signal）
             if b.signal not in signals:
                 continue
             if b.virtual_midi:

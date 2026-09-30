@@ -109,7 +109,8 @@ def test_send_panel_cc(qtbot):
 
 from core.bindings import Binding, BindingConfig, BindingSource
 import ui.bindings_view
-from ui.bindings_view import BindingsView
+from ui.bindings_view import BindingsView, BindingEditDialog
+from PyQt6.QtCore import Qt
 
 
 def test_bindings_view_renders_config(qtbot):
@@ -118,7 +119,61 @@ def test_bindings_view_renders_config(qtbot):
     v = BindingsView(config=cfg)
     qtbot.addWidget(v)
     assert v.table.rowCount() == 1
-    assert v.table.item(0, 1).text() == "drum_hit"  # col 0=checkbox, col 1=signal
+    # col 0=启用开关, col 1=行选择, col 2=信号名
+    assert v.table.item(0, 2).text() == "drum_hit"
+
+
+def test_bindings_view_enable_toggle_updates_config(qtbot):
+    """勾掉「启用」→ 绑定变停用；勾回来 → 恢复启用。"""
+    cfg = BindingConfig(bindings=[Binding(signal="a", sources=[
+        BindingSource.from_dict({"type": "midi", "channel": 9})])])
+    v = BindingsView(config=cfg)
+    qtbot.addWidget(v)
+    item = v.table.item(0, 0)
+    assert item.checkState() == Qt.CheckState.Checked
+
+    item.setCheckState(Qt.CheckState.Unchecked)      # 触发 itemChanged → 写回配置
+    assert cfg.bindings[0].enabled is False
+
+    item.setCheckState(Qt.CheckState.Checked)
+    assert cfg.bindings[0].enabled is True
+
+
+def test_bindings_view_disabled_row_grayed(qtbot):
+    """停用行的内容灰化，启用行用正常文字色。"""
+    from ui import style_qss as QSS
+    cfg = BindingConfig(bindings=[
+        Binding(signal="on", sources=[BindingSource.from_dict({"type": "midi", "channel": 9})]),
+        Binding(signal="off", sources=[BindingSource.from_dict({"type": "midi", "channel": 9})],
+                enabled=False),
+    ])
+    v = BindingsView(config=cfg)
+    qtbot.addWidget(v)
+    assert v.table.item(1, 2).foreground().color().name().upper() == QSS.MUTED.upper()
+    assert v.table.item(0, 2).foreground().color().name().upper() == QSS.TEXT.upper()
+
+
+def test_bindings_view_row_pick_column_is_col1(qtbot):
+    """批量删除仍读第 1 列的选择框，第 0 列的启用开关不算选中。"""
+    cfg = BindingConfig(bindings=[Binding(signal="a", sources=[
+        BindingSource.from_dict({"type": "midi", "channel": 9})])])
+    v = BindingsView(config=cfg)
+    qtbot.addWidget(v)
+    v.table.item(0, 0).setCheckState(Qt.CheckState.Unchecked)
+    assert v._selected_rows() == []
+    v.table.item(0, 1).setCheckState(Qt.CheckState.Checked)
+    assert v._selected_rows() == [0]
+
+
+def test_edit_dialog_preserves_enabled(qtbot):
+    """编辑对话框保存后不应把停用的绑定悄悄改回启用。"""
+    b = Binding(signal="a", sources=[BindingSource.from_dict({"type": "midi", "channel": 9})],
+                enabled=False)
+    dlg = BindingEditDialog(b)
+    qtbot.addWidget(dlg)
+    dlg._accept()
+    assert dlg.result_binding().signal == "a"
+    assert dlg.result_binding().enabled is False
 
 
 def test_bindings_view_save_config(qtbot, tmp_path):
@@ -186,7 +241,7 @@ def test_bindings_view_edit_dialog(qtbot, monkeypatch):
     assert cfg.bindings[0].virtual_midi == {"channel": 3}
     # 表格已刷新
     assert v.table.rowCount() == 1
-    assert v.table.item(0, 1).text() == "solo"
+    assert v.table.item(0, 2).text() == "solo"
 
 
 from app import create_binding_config_path
