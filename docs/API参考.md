@@ -261,8 +261,14 @@ Binding(
     sources=[BindingSource(...)],           # 匹配源列表（任一命中即可）
     virtual_midi={"channel": 3, "note": 36}, # 可选：虚拟 MIDI 转发
     key_out={"key": "space"},                # 可选：模拟键盘
+    enabled=True,                            # False = 停用：不参与匹配、不执行动作
 )
 ```
+
+停用（`enabled=False`）的绑定会被 `Matcher` 跳过，`execute_actions()` 也不会执行它，
+即 MIDI / 键盘 / `trigger_signal()` 三条路径都失效。序列化时只在停用状态下写出
+`"enabled": false`，因此旧配置文件（无该字段）读进来即为启用。
+界面上对应「信号绑定」列表第一列的启用开关。
 
 ### `BindingConfig`
 
