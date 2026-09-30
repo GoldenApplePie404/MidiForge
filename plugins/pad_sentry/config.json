@@ -5,7 +5,7 @@
   ],
   "volume": 0.73,
   "enabled": true,
-  "pedal_kick": false,
+  "pedal_kick": true,
   "pad_pulse_ms": 300,
   "pads": [
     {
