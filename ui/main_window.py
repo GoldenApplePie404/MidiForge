@@ -1,5 +1,5 @@
 from PyQt6.QtCore import Qt, QObject, QTimer, pyqtSignal
-from PyQt6.QtGui import QKeyEvent
+from PyQt6.QtGui import QAction, QKeyEvent
 from PyQt6.QtWidgets import QMainWindow, QSplitter, QStatusBar, QTabWidget, QVBoxLayout, QWidget
 
 import api
@@ -9,6 +9,7 @@ from midi.parser import MIDO_TYPE_MAP, ParsedMessage
 from ui.bindings_view import BindingsView, BindingEditDialog
 from ui.channel_matrix import ChannelMatrix
 from ui.log_view import LogView
+from ui.plugin_manager import PluginManagerDialog
 from ui.plugin_tabs import PluginTabs
 from ui.port_panel import PortPanel
 from ui.send_panel import SendPanel
@@ -64,23 +65,22 @@ class MainWindow(QMainWindow):
         # 日志右键 → 快速创建绑定
         self.log_view.request_create_binding.connect(self._on_create_binding_from_log)
 
-        # 插件加载与挂载（失败隔离）
+        # 插件加载与挂载（失败隔离 + 可插拔）
         self.plugin_tabs = PluginTabs()
-        self.plugin_host = PluginHost(plugins_dirs)
+        self.plugin_host = PluginHost(
+            plugins_dirs, state_path=app.data_dir("host") / "plugins.json")
         self.plugin_host.load_and_activate(app)
         for item in self.plugin_host.items:
-            if item.get("disabled"):
-                self.plugin_tabs.show_error(item["name"], item.get("error") or "未知错误")
-                continue
-            try:
-                panel = item["instance"].create_panel()
-            except Exception as exc:
-                self.plugin_tabs.show_error(item["name"], f"面板构造失败: {exc}")
-                continue
-            if panel is not None:
-                self.plugin_tabs.mount(item["name"], panel, item.get("status", "stable"))
+            self._apply_plugin_view(item["name"])
+        self.plugin_tabs.toggle_requested.connect(self._on_plugin_toggle)
         if self.plugin_tabs.count():
             self.tabs.addTab(self.plugin_tabs, "插件")
+
+        # 插件管理菜单
+        menu_plugin = self.menuBar().addMenu("插件")
+        act_manager = QAction("管理插件…", self)
+        act_manager.triggered.connect(self._on_plugin_manager)
+        menu_plugin.addAction(act_manager)
 
         root.addWidget(self.port_panel)
         root.addWidget(self.tabs, 1)
@@ -107,6 +107,38 @@ class MainWindow(QMainWindow):
         self._bridge.signal_hit.connect(self._on_signal)
         self._bridge.sent_msg.connect(self._on_sent)
         self._bridge.action_done.connect(self._on_action)
+
+    # ---- 插件可插拔 ----
+
+    def _apply_plugin_view(self, name: str) -> None:
+        """按 host 中该插件的当前状态刷新 tab（面板 / 占位 / 错误）。"""
+        item = next((i for i in self.plugin_host.items if i["name"] == name), None)
+        if item is None:
+            return
+        if item.get("error"):
+            self.plugin_tabs.show_error(name, item["error"])
+            return
+        if not item.get("enabled"):
+            self.plugin_tabs.set_view(name, None, item.get("status", "stable"),
+                                      enabled=False)
+            return
+        try:
+            panel = item["instance"].create_panel()
+        except Exception as exc:
+            self.plugin_tabs.show_error(name, f"面板构造失败: {exc}")
+            return
+        self.plugin_tabs.set_view(name, panel, item.get("status", "stable"))
+
+    def _on_plugin_toggle(self, name: str, enable: bool) -> None:
+        ok, msg = self.plugin_host.set_enabled(name, enable, self.app)
+        self._apply_plugin_view(name)
+        tip = f"插件 {name} {msg}" if ok else f"插件 {name}: {msg}"
+        self.statusBar().showMessage(tip, 4000)
+
+    def _on_plugin_manager(self) -> None:
+        dlg = PluginManagerDialog(self.plugin_host, self.app,
+                                  on_changed=self._on_plugin_toggle, parent=self)
+        dlg.exec()
 
     # ---- 设备 ----
     def _on_input_changed(self, name: str) -> None:

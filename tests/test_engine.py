@@ -13,13 +13,20 @@ def _base(name: str) -> str:
 
 
 def _find_loopback_pair() -> tuple[str, str] | None:
-    """找一对 base 名相同的 (输出端口, 输入端口)。"""
+    """在明示的虚拟端口（loopMIDI / virtual）里找 in/out base 名相同的一对。
+
+    不能按"base 名相同"盲目匹配：硬件键盘的 in/out base 名也可能相同
+    （如 KL Essential 61），发到键盘输出口的消息不会回环，
+    输入口收到的反而是实时弹奏，测试就会随机失败。
+    """
     ins = mido.get_input_names()
     outs = mido.get_output_names()
     for out in outs:
-        base = _base(out)
-        if any(_base(inp) == base for inp in ins):
-            inp = next(i for i in ins if _base(i) == base)
+        lower = out.lower()
+        if "loopmidi" not in lower and "virtual" not in lower:
+            continue
+        inp = next((i for i in ins if _base(i) == _base(out)), None)
+        if inp is not None:
             return out, inp
     return None
 
