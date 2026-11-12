@@ -1,0 +1,9 @@
+{
+  "disabled": [
+    "note_sentry",
+    "practice2",
+    "recorder",
+    "synth",
+    "sysex_editor"
+  ]
+}

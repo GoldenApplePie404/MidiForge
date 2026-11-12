@@ -82,6 +82,12 @@ class MainWindow(QMainWindow):
         act_manager.triggered.connect(self._on_plugin_manager)
         menu_plugin.addAction(act_manager)
 
+        # 设置菜单
+        menu_settings = self.menuBar().addMenu("设置")
+        act_audio = QAction("音频设置…", self)
+        act_audio.triggered.connect(self._on_audio_settings)
+        menu_settings.addAction(act_audio)
+
         root.addWidget(self.port_panel)
         root.addWidget(self.tabs, 1)
         self.setStatusBar(QStatusBar())
@@ -138,6 +144,11 @@ class MainWindow(QMainWindow):
     def _on_plugin_manager(self) -> None:
         dlg = PluginManagerDialog(self.plugin_host, self.app,
                                   on_changed=self._on_plugin_toggle, parent=self)
+        dlg.exec()
+
+    def _on_audio_settings(self) -> None:
+        from ui.audio_settings import AudioSettingsDialog
+        dlg = AudioSettingsDialog(self.app, parent=self)
         dlg.exec()
 
     # ---- 设备 ----

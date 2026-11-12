@@ -22,9 +22,3 @@ debug.log
 .superpowers/
 plugins/sysex_editor/data/
 plugins/synth/config.json
-plugins/pad_sentry/config.json
-config/
-
-# practice2 运行时产物（采样 wav 首次弹奏自动合成）
-plugins/practice2/sounds/
-plugins/practice2/data/

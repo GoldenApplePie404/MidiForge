@@ -3,9 +3,9 @@
     102,
     109
   ],
-  "volume": 0.73,
+  "volume": 0.77,
   "enabled": true,
-  "pedal_kick": true,
+  "pedal_kick": false,
   "pad_pulse_ms": 300,
   "pads": [
     {

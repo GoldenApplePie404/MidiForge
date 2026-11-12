@@ -1,0 +1,9 @@
+{
+  "tone": "electric",
+  "speed": 1.0,
+  "mode": "follow",
+  "part": "all",
+  "tail": 0.6,
+  "count_in": true,
+  "fall_speed": 160
+}

@@ -158,7 +158,14 @@ class Practice2Plugin(Plugin):
         app.subscribe("midi.note_on", self._on_note_on)
         app.subscribe("midi.note_off", self._on_note_off)
         app.subscribe("midi.cc", self._on_cc)
+        # 音频引擎重建（用户切换输出设备等）后句柄全失效，清空重载
+        app.subscribe("audio.restarted", self._on_audio_restarted)
         self.log.info("activated")
+
+    def _on_audio_restarted(self, _data=None):
+        self._sfx.clear()
+        self._click = None
+        self.log.info("音频引擎已重建，采样缓存已清空")
 
     def on_deactivate(self):
         self.engine.pause()

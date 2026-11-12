@@ -24,6 +24,7 @@
 """
 
 import collections
+import json
 import logging
 import threading
 import time
@@ -59,6 +60,7 @@ TOPIC_SENT = "midi.sent"
 TOPIC_KEY = "key.pressed"
 TOPIC_BINDING = "binding.changed"
 TOPIC_ACTION = "binding.action"
+TOPIC_AUDIO_RESTARTED = "audio.restarted"   # mixer 重建（音频设置切换后）
 
 # 向后兼容旧 topic 名
 TOPIC_MESSAGE = TOPIC_ALL
@@ -257,9 +259,34 @@ class AppContext:
         self.state = _MidiState()
         self.log = _Logger("host")
         self.bindings = _BindingRuntime(self)
-        self.audio = _AudioService()
+        self.audio = _AudioService(desired=self.load_audio_config())
+        self.audio.on_restarted = lambda: self.bus.publish(TOPIC_AUDIO_RESTARTED, None)
         self.clock = _Clock(bus=self.bus)
         self.midi_file = _MidiFileService()
+
+    # ---- 音频设置持久化 ----
+
+    def load_audio_config(self) -> dict:
+        """读 config/audio.json。损坏/缺失按全默认（None=系统默认）。"""
+        cfg = {"device": None, "driver": None, "sample_rate": None, "buffer": None}
+        path = self.data_dir("host") / "audio.json"
+        if path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    for k in cfg:
+                        if k in data:
+                            cfg[k] = data[k]
+            except Exception:
+                pass
+        return cfg
+
+    def save_audio_config(self, cfg: dict) -> None:
+        """写 config/audio.json（音频设置应用成功后调用）。"""
+        path = self.data_dir("host") / "audio.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2),
+                        encoding="utf-8")
 
     # ---- 事件订阅 ----
 

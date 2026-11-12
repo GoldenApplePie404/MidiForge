@@ -53,13 +53,18 @@ class _SfxHandle:
             self._sound.stop()
 
 
+# 驱动降级链：实测 SDL 的 WASAPI 后端在本机可能失败，WinMM/DirectSound 兜底。
+# WinMM 排在 DirectSound 之前：DirectSound 会占住输出设备，
+# 导致 PortAudio（synth 插件）开不了流——两败俱伤。
+_DRIVER_FALLBACK = ("", "winmm", "directsound")
+
+
 class _AudioService:
     """宿主统一音频服务。单例，宿主在 AppContext 里创建一次。"""
 
-    def __init__(self, sample_rate: int = 44100, channels: int = 32, buffer: int = 1024):
-        self._sample_rate = sample_rate
+    def __init__(self, sample_rate: int = 44100, channels: int = 32, buffer: int = 1024,
+                 desired: Optional[dict] = None):
         self._channels = channels
-        self._buffer = buffer
         self._inited = False
         self._lock = threading.Lock()
         self._master_volume = 1.0
@@ -71,22 +76,50 @@ class _AudioService:
         self._next_base = 0
         # 无池全局播放的 round-robin 索引
         self._global_idx = 0
+        # 用户期望配置（None 值 = 用默认）。sample_rate/buffer 缺省回退到参数值。
+        self._desired = {"device": None, "driver": None,
+                         "sample_rate": None, "buffer": None}
+        if desired:
+            self._desired.update({k: v for k, v in desired.items() if k in self._desired})
+        self._sample_rate = self._desired["sample_rate"] or sample_rate
+        self._buffer = self._desired["buffer"] or buffer
+        self._driver = ""       # 当前实际生效的驱动（""=SDL 默认）
+        # mixer 重建成功后的回调（AppContext 注入 → 广播 audio.restarted）。
+        # core 层不知事件总线，以此解耦。
+        self.on_restarted = None
 
     # ---- 初始化 ----
+
+    def _try_init(self, drivers, sample_rate: int, buffer: int,
+                  device: Optional[str]) -> bool:
+        """按驱动序列逐个尝试 init，成功返回 True，失败原因写入 last_error。"""
+        errors = []
+        for driver in drivers:
+            try:
+                pygame.mixer.quit()
+            except Exception:
+                pass
+            if driver:
+                os.environ["SDL_AUDIODRIVER"] = driver
+            else:
+                os.environ.pop("SDL_AUDIODRIVER", None)
+            try:
+                pygame.mixer.init(sample_rate, -16, 2, buffer,
+                                  devicename=device or None)
+                pygame.mixer.set_num_channels(self._channels)
+                self._driver = driver or ""
+                self._inited = True
+                self.last_error = ""
+                return True
+            except Exception as exc:
+                errors.append(f"{driver or 'default'}: {exc}")
+        self.last_error = " | ".join(errors)
+        return False
 
     def init_if_needed(self) -> bool:
         """延迟初始化——pygame 不在也不会崩。
 
-        依次尝试三档配置，失败原因写进 last_error：
-            1. 默认驱动（WASAPI，音质最好）
-            2. WinMM（waveOut）
-            3. DirectSound
-        为什么需要后面两档：实测本机 SDL 的 WASAPI 后端稳定失败
-        （"WASAPI can't initialize audio client"），不降级的话 pad_sentry 这类
-        插件会全军覆没，且只会看到一堆含糊的"采样加载失败"。
-        WinMM 排在 DirectSound 之前是因为实测：WinMM 初始化后 PortAudio
-        （synth 插件用的）仍能正常开 MME 流，而 DirectSound 会把输出设备占住，
-        导致 PortAudio 的 MME/WASAPI 全部开不了流——两败俱伤。
+        用户指定了驱动时先试指定值，失败回退默认降级链（原因记入 last_error）。
         """
         if self._inited:
             return True
@@ -96,31 +129,87 @@ class _AudioService:
         with self._lock:
             if self._inited:
                 return True
-            errors = []
-            for driver in ("", "winmm", "directsound"):
-                try:
-                    pygame.mixer.quit()
-                except Exception:
-                    pass
-                if driver:
-                    os.environ["SDL_AUDIODRIVER"] = driver
-                else:
-                    os.environ.pop("SDL_AUDIODRIVER", None)
-                try:
-                    pygame.mixer.init(self._sample_rate, -16, 2, self._buffer)
-                    pygame.mixer.set_num_channels(self._channels)
-                except Exception as exc:
-                    errors.append(f"{driver or 'default'}: {exc}")
-                    continue
-                self._inited = True
-                self.last_error = ""
+            sr, buf, dev = self._sample_rate, self._buffer, self._desired["device"]
+            if self._desired["driver"]:
+                if self._try_init([self._desired["driver"]], sr, buf, dev):
+                    return True
+            if self._try_init(_DRIVER_FALLBACK, sr, buf, dev):
                 return True
-            self.last_error = " | ".join(errors)
+            # 指定设备可能就是失败根源：最后再试一次全默认
+            if dev or self._desired["driver"]:
+                if self._try_init(_DRIVER_FALLBACK, sr, buf, None):
+                    return True
             return False
 
     @property
     def inited(self) -> bool:
         return self._inited
+
+    # ---- 设备枚举 / 配置 ----
+
+    def list_output_devices(self) -> list:
+        """枚举输出设备名。pygame._sdl2 缺失或失败时返回空列表（UI 显示"仅系统默认"）。"""
+        if not _PYGAME_AVAILABLE:
+            return []
+        try:
+            from pygame._sdl2.audio import get_audio_device_names
+            return list(get_audio_device_names(False))   # False=输出（非录音）
+        except Exception:
+            return []
+
+    def current_config(self) -> dict:
+        """当前生效配置（desired 语义：None=系统默认）。UI 打开对话框时回填用。"""
+        return dict(self._desired)
+
+    def restart(self, **overrides) -> tuple:
+        """应用新音频参数并重建 mixer。返回 (成功?, 错误信息)。
+
+        新参数失败时按旧参数回退重试；都失败返回原因（mixer 可能已停，
+        调用方应提示用户）。成功后经 on_restarted 回调通知宿主广播
+        audio.restarted——mixer 重建使所有已加载 Sound 失效，插件须清缓存。
+        """
+        if not _PYGAME_AVAILABLE:
+            return False, "pygame 不可用"
+        with self._lock:
+            old = dict(self._desired)
+            new = dict(old)
+            # 显式传入的 key 全部覆盖（含 None=恢复默认）；未传入的不动
+            for k in new:
+                if k in overrides:
+                    new[k] = overrides[k]
+            sr = new["sample_rate"] or self._sample_rate
+            buf = new["buffer"] or self._buffer
+            dev = new["device"]
+
+            self._inited = False
+            # 新参数：指定驱动优先，未指定走降级链
+            drivers = [new["driver"]] if new["driver"] else _DRIVER_FALLBACK
+            if self._try_init(drivers, sr, buf, dev):
+                self._desired = new
+                self._sample_rate, self._buffer = sr, buf
+                self._notify_restarted()
+                return True, ""
+            # 新参数失败 → 旧参数回退（全默认兜底），保证音频尽量活着。
+            # 回退成功会清空 last_error，先存下切换失败的原因供 UI 提示。
+            first_err = self.last_error
+            old_drivers = [old["driver"]] if old["driver"] else _DRIVER_FALLBACK
+            old_sr = old["sample_rate"] or 44100
+            old_buf = old["buffer"] or 1024
+            if self._try_init(old_drivers, old_sr, old_buf, old["device"]) \
+                    or self._try_init(_DRIVER_FALLBACK, old_sr, old_buf, None):
+                self._desired = old
+                self._sample_rate, self._buffer = old_sr, old_buf
+                self.last_error = first_err
+                self._notify_restarted()
+                return False, first_err
+            return False, self.last_error
+
+    def _notify_restarted(self) -> None:
+        if self.on_restarted:
+            try:
+                self.on_restarted()
+            except Exception:
+                pass
 
     # ---- 主音量 ----
 

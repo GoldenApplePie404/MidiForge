@@ -240,6 +240,14 @@ class PadSentry(Plugin):
 
         # ---- 订阅细分 topic（宿主已按 type 过滤，直接拿到 cc 类型消息）----
         app.subscribe("midi.cc", self._on_cc)
+        # 音频引擎重建（用户切换输出设备等）后句柄全失效，清空重载
+        app.subscribe("audio.restarted", self._on_audio_restarted)
+
+    def _on_audio_restarted(self, _data=None):
+        self._sfx.clear()
+        for pad in self.config["pads"]:
+            self._load_pad_sfx(pad)
+        self.log.info("音频引擎已重建，采样已重载")
 
     def on_deactivate(self):
         for sfx in self._sfx.values():
