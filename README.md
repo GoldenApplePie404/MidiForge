@@ -7,7 +7,7 @@
 - 键盘 ↔ MIDI 信号绑定，JSON 持久化，每条可单独启用/停用
 - 霓虹暗色主题，16 通道矩阵 + 消息日志 + 发送测试面板
 - 事件总线驱动，支持 Python 插件和 headless SDK
-- 7 个内置插件：打击垫、实时示波器、录制回放、钢琴帘练习、下落音符练习、实时合成器、SysEx 抓包
+- 8 个内置插件：打击垫、实时示波器、录制回放、钢琴帘练习、下落音符练习、实时合成器、SysEx 抓包、串口桥
 - 发送 SysEx 带安全网关（黑名单硬拦截 + 高危告警）
 
 > 更细的资料在 `docs/`：[API 参考](docs/API参考.md)（数据模型 / 事件总线 / 插件 API 全表）、[MIDI 协议详解](docs/MIDI协议详解.md)。
@@ -39,17 +39,6 @@ python -m venv .venv
 .venv\Scripts\python app.py
 ```
 
-### 测试
-
-```bash
-# 全部（必须带上 --ignore，原因见下）
-.venv\Scripts\python -m pytest tests/ -q --ignore=tests/test_practice_engine.py --ignore=tests/test_practice_exercises.py
-```
-
-当前状态：**113 passed, 1 failed**。失败的是 `tests/test_engine.py::test_loopback_roundtrip`，它需要真实的 loopMIDI 回环端口，环境不具备时自动跳过。
-
-> `tests/test_practice_engine.py` 和 `tests/test_practice_exercises.py` 引用的是 practice 插件重构前删掉的 `midi_practice` 包，`import` 阶段就会报错。直接跑 `pytest tests/` 会中断整个收集过程，所以要用上面的 `--ignore` 排除。
-
 ### 依赖
 
 宿主主依赖（`requirements.txt`）：
@@ -68,12 +57,15 @@ python -m venv .venv
 | 包 | 用于 | 安装 |
 |---|---|---|
 | PyQt6-WebEngine | practice 插件（乐谱渲染） | `pip install PyQt6-WebEngine` |
-| numpy | synth（DSP 内核）、practice2（音色合成） | `pip install numpy` |
+| numpy | synth（DSP 内核）、piano_drift（音色合成） | `pip install numpy` |
 | sounddevice | synth 插件（音频输出） | `pip install -r plugins/synth/requirements.txt` |
+| pyserial | serial_bridge 插件（串口 ↔ MIDI 桥接） | `pip install -r plugins/serial_bridge/requirements.txt` |
 
 ---
 
 ## 使用指南
+
+> 在以下的测试中，我使用的是我的 MIDI 键盘进行测试的，型号为KeyLab Essential 61 mk3
 
 ### 连接 MIDI 设备
 
@@ -125,6 +117,16 @@ python -m venv .venv
 - **持久化**：停用列表保存在 `config/plugins.json`，下次启动自动跳过这些插件的激活
 - 重新启用时会**重建插件实例**（重新 `on_activate` + 重建面板），插件自身的配置（`data/config.json`）也会重新加载；加载失败的插件开关置灰不可启用
 
+### 音频设置
+
+菜单栏「设置 → 音频设置…」，可自定义音频输出，应用后**即时生效**：
+
+- **输出设备**：枚举系统全部输出设备（声卡/虚拟声卡如 VB-Audio Cable），默认「系统默认」
+- **驱动后端**：自动（推荐，失败自动降级）/ WASAPI / WinMM / DirectSound
+- **采样率**：44100 / 48000 Hz；**缓冲区**：256–2048（越小延迟越低，越大越稳定）
+- 应用时重建音频引擎，已加载的采样（打击垫、练习插件）**自动重新加载**，无需重启宿主
+- 切换失败自动回退到原设置并提示原因；配置保存在 `config/audio.json`，下次启动直接生效
+
 ### 内置插件
 
 插件放在 `plugins/` 下，宿主启动时自动发现。单个插件加载失败会被隔离成一条错误提示，不影响宿主和其他插件。
@@ -136,8 +138,9 @@ python -m venv .venv
 | oscilloscope | 实时示波器：CC 热力图 / Pitch Bend 波形 / 触后曲线 | v0.1 | 完成度较高，有待完善             |
 | recorder | 录制 MIDI 输入 → 保存 `.mid` → 回放 | v0.1 | 框架已搭好，功能待完善   |
 | practice | 61 键钢琴帘 + 五线谱/简谱 + 半自动练习 | v0.2 | 完成度较高，仍有细节待完善   |
-| practice2 | 88 键下落音符练习：三模式 / 分声部 / A-B 循环 | v2.0 | 核心功能完整，细节待打磨   |
+| piano_drift | 88 键下落音符练习：三模式 / 分声部 / A-B 循环 | v2.0 | 核心功能完整，细节待打磨   |
 | sysex_editor | 只读 SysEx 抓包器（接收 / 分类 / 复制） | v0.2 | 开发中，但重心已不在此；仅作测试用途   |
+| serial_bridge | 串口 ↔ MIDI 双向桥：自制硬件（Arduino/ESP32）经 UART 进入 MIDI 世界 | v0.2 | 透传 + MFSP 双协议、虚拟端口双向映射表可用 |
 
 #### PadSentry 打击垫插件
 
@@ -187,6 +190,8 @@ python -m venv .venv
 - MASTER：主音量、复音数（1–16）、弯音范围
 
 「通道」下拉可以只让某个通道的键盘发声（默认全部）。音频设备空闲 10 秒自动释放，参数改动自动落盘到 `plugins/synth/config.json`（运行时生成，不入库）。
+
+> 注意：合成器插件当前版本还有一些尚未修复的bug
 
 #### Oscilloscope实时示波器插件
 
@@ -241,7 +246,7 @@ python -m venv .venv
 - 练习时乐谱会跟着进度滚动并高亮当前小节
 - 依赖 `PyQt6-WebEngine` 渲染乐谱，没装的话插件会加载失败
 
-#### Practice2 下落音符练习插件
+#### PianoDrift 下落音符练习插件
 
 横版下落音符练习器（旧 practice 插件的 2.0）：音符像音游一样落到 88 键键盘上，落线的瞬间按下对应的键。三种练习模式覆盖从跟弹到识谱，伴奏声部会自动跟着响。
 
@@ -281,6 +286,53 @@ python -m venv .venv
 - 「风险」列来自平台的安全网关分级，高危厂商消息会标出来
 - 列表最多保留最近 500 条（`capture_max`，配置在 `plugins/sysex_editor/data/config.json`）
 - 该插件仅作测试用途，后续开发重心不在这里
+
+#### SerialBridge 串口桥插件
+
+自制硬件往往只有一个 UART 串口，这个插件就是它和 MIDI 之间的桥。Arduino、ESP32、STM32 做的开发板合成器、DIY 控制器，插上 USB 就能参与 MidiForge 的所有活动。协议有两种，面板下拉即可切换：
+
+- **透传**。串口上跑标准 MIDI 1.0 字节流（默认 115200 波特），与 Hairless MIDI-Serial Bridge 兼容。设备端用 [Arduino MIDI Library](https://github.com/FortySevenEffects/arduino_midi_library) 或 espMIDI 这类现成库就行，不需要自定义协议
+- **MFSP 帧协议**。每帧带 CRC8 校验，1 秒一次心跳用来判断设备是否在线，另有 debug 文本通道和虚拟端口（analog/digital 各 0-15）。设备端引入插件自带的 `plugins/serial_bridge/device/mfsp_arduino.h`（header-only）即可
+
+**用法：**
+
+1. 先装依赖 `pip install -r plugins/serial_bridge/requirements.txt`，设备 USB 插好后切到插件 Tab
+2. 选串口（热插拔后点「刷新」）、选波特率（默认 115200）、选协议，然后点「连接」
+3. 勾上「串口 → MIDI」，设备发来的音符和 CC 会走统一分发，示波器可视化、录制器录 `.mid`、绑定触发、synth 发声都不需要再配置
+4. 勾上「MIDI → 串口」则反过来，由宿主驱动设备，比如让设备的 LED 跟着 CC 变化
+
+**MFSP 虚拟端口与双向映射表：**
+
+- 固件只认端口号（analog 0-15，值 0-4095；digital 0-15，开关量），完全不涉及 MIDI 概念。翻译工作在电脑端做：入向映射表把端口转成 CC/音符，出向映射表把 CC/音符转成 analog/digital 输出。想换映射改表格就行，固件不用动
+- MFSP 下状态行显示设备心跳，3 秒没有心跳就判定离线；设备的 debug 文本会以 `»` 前缀出现在监视区
+- 映射换算规则：入向 analog（0-4095）转 CC 按 12bit 压到 7bit，digital 按边缘触发；出向 CC（0-127）转 analog 左移 5 位（相当于乘 32），CC≥64 转 digital 为开，note 力度转 analog 电平
+
+**实战示例：ESP32 推杆调光板载 LED（已真机验证）**
+
+1. 用 Arduino IDE 打开 `plugins/serial_bridge/device/examples/mfsp_minimal_single.ino`。协议实现已经内联，单文件就能编译，开发板选 ESP32 Dev Module，然后 Upload
+2. 串口桥面板选板子的 COM 口、115200、协议 MFSP，点连接。状态行应显示「在线 · 心跳: 正常」，监视区会出现 `» mfsp ready` 和每秒一帧的 `7E 04 40 …` 心跳
+3. 勾「MIDI → 串口」，在出向映射表加一行「启用 ✓ · CC · 编号 73 · → 模拟 · 端口 0」。73 请换成你键盘推杆实际的 CC 号，推一下推杆，在主界面日志里就能看到
+4. 再推推杆，监视区应出现 `← 7E 04 83 …`（analog_out 帧），ESP32 板载 LED 亮度随之线性变化，拉到底熄灭，推到底最亮
+5. 同一份固件也能反过来用：A0 接电位器，入向映射「模拟 端口0 → CC」，就是一个 DIY MIDI 旋钮；GPIO4 接按键（接 GND），映射「数字 端口0 → 音符」，就是一个 DIY 打击垫
+
+**无硬件自检：** 串口下拉选 `loop://`，连接后勾双向，弹宿主键盘。监视区应同时出现 `←` 出站字节和 `→` 回环进站；MFSP 下还能验证心跳/ping 闭环，全程不需要真实设备。
+
+**故障排查：**
+
+- **插上板子没有新 COM 口**：经典 ESP32 走板载 USB 转串芯片，装 CP210x（Silicon Labs）或 CH340 驱动；S2/S3/C3 原生 USB-CDC 免驱，显示为「USB 串行设备」
+- **连接瞬间监视区有乱码/解码错误**：属正常现象，那是 ESP32 的启动日志（ROM bootloader 输出），重同步状态机会自动找回帧头
+- **连接失败/端口被占用**：Arduino IDE 的串口监视器、其他串口工具会独占 COM 口，先关掉再连
+- **推杆推了但监视区没有 `←` 帧**：依次检查「MIDI → 串口」是否勾选、出向映射编号是否与推杆 CC 号一致、相关插件是否已启用
+- **怀疑固件端协议坏了**：烧 `device/examples/mfsp_selftest.ino` 跑设备端逐字节自检（与 pytest 共用同一份 `mfsp_vectors.json` 测试向量）
+
+**说明：**
+
+- 「通道改写」可以把设备发来的消息统一改写到指定 MIDI 通道（默认保持原样；MFSP 没有通道概念，默认 ch0）。DIY 设备通道乱飞的时候，用它对绑定会方便很多
+- 十六进制监视区保留最近 200 行收发字节（`→` 表示串口进，`←` 表示串口出）。串口断流残留的垃圾字节会计入「解码错误」，随后自动重对齐
+- 连接期间掉线会自动重连（1 秒起步，指数退避到 8 秒）；配置（含映射表）自动保存到 `plugins/serial_bridge/config.json`
+- 有防回环保护：设备自己发出的消息、宿主虚拟端口的回声，都不会再转发回串口
+- 设备端对接材料（接线、帧格式表、Arduino 示例、共享测试向量）都在 `plugins/serial_bridge/device/README.md`
+- 真机验证看两个现象就够：设备发 `note_on`，pad_sentry 应该出声；宿主弹键盘，监视区应出现 `←` 字节
 
 <br />
 
@@ -457,7 +509,7 @@ midi/
 │   ├── oscilloscope/             # 实时示波器
 │   ├── recorder/                 # 录制 / 回放
 │   ├── practice/                 # 钢琴帘练习
-│   ├── practice2/              # 88 键下落音符练习
+│   ├── piano_drift/              # 88 键下落音符练习
 │   └── sysex_editor/             # SysEx 抓包器
 │
 ├── examples/

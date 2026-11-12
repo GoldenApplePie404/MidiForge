@@ -79,6 +79,14 @@ class MidiEngine:
             out.append(self._queue.get_nowait())
         return out
 
+    def inject(self, parsed: ParsedMessage) -> None:
+        """外部来源注入（串口桥等）：解析好的消息进统一分发队列。
+
+        与端口回调同路（_queue → drain → AppContext._on_parsed），
+        绑定触发/录制/示波器全链路免费生效；不触碰回声指纹逻辑。
+        """
+        self._queue.put(parsed)
+
     # ---- 发送 ----
     def send_message(self, type: str, channel: int = 0, **kwargs) -> None:
         if self._out_port is None:

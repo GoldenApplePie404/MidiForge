@@ -1,0 +1,112 @@
+{
+  "comment": "MFSP v1 共享测试向量（pytest 与设备端同源）：frame 为完整帧十六进制，含 CRC8（多项式 0x07，初值 0x00，检查值 \"123456789\"→0xF4）。encode=宿主→设备（plugin 编码断言），decode=设备→宿主（codec 解码断言）。",
+  "encode": [
+    {
+      "name": "note_on 60 vel100",
+      "cmd": "0x80",
+      "payload": "3C 64",
+      "frame": "7E 03 80 3C 64 35"
+    },
+    {
+      "name": "note_off 60",
+      "cmd": "0x81",
+      "payload": "3C",
+      "frame": "7E 02 81 3C 17"
+    },
+    {
+      "name": "cc7 val100",
+      "cmd": "0x82",
+      "payload": "07 64",
+      "frame": "7E 03 82 07 64 8D"
+    },
+    {
+      "name": "analog_out port3=2048",
+      "cmd": "0x83",
+      "payload": "03 00 08",
+      "frame": "7E 04 83 03 00 08 8E"
+    },
+    {
+      "name": "digital_out port0=1",
+      "cmd": "0x84",
+      "payload": "00 01",
+      "frame": "7E 03 84 00 01 A7"
+    },
+    {
+      "name": "ping",
+      "cmd": "0x8F",
+      "payload": "",
+      "frame": "7E 01 8F A4"
+    }
+  ],
+  "decode": [
+    {
+      "name": "note_on 60 vel100",
+      "frame": "7E 03 10 3C 64 9C",
+      "expect_type": "note_on",
+      "expect_channel": 0,
+      "expect_values": {
+        "note": 60,
+        "velocity": 100
+      }
+    },
+    {
+      "name": "note_off 60",
+      "frame": "7E 02 11 3C F6",
+      "expect_type": "note_off",
+      "expect_channel": 0,
+      "expect_values": {
+        "note": 60,
+        "velocity": 0
+      }
+    },
+    {
+      "name": "cc7 val100",
+      "frame": "7E 03 20 07 64 13",
+      "expect_type": "cc",
+      "expect_channel": 0,
+      "expect_values": {
+        "control": 7,
+        "value": 100
+      }
+    },
+    {
+      "name": "pitchbend 居中",
+      "frame": "7E 03 30 00 40 26",
+      "expect_type": "pitch_bend",
+      "expect_channel": 0,
+      "expect_values": {
+        "pitch": 0
+      }
+    },
+    {
+      "name": "heartbeat uptime 258",
+      "frame": "7E 03 40 02 01 AB",
+      "expect_uptime": 258
+    },
+    {
+      "name": "analog_in port2=4095",
+      "frame": "7E 04 50 02 FF 0F D0",
+      "expect_type": "analog_in",
+      "expect_channel": null,
+      "expect_values": {
+        "port": 2,
+        "value": 4095
+      }
+    },
+    {
+      "name": "digital_in port7=1",
+      "frame": "7E 03 51 07 01 23",
+      "expect_type": "digital_in",
+      "expect_channel": null,
+      "expect_values": {
+        "port": 7,
+        "state": 1
+      }
+    },
+    {
+      "name": "debug 'hello'",
+      "frame": "7E 06 F0 68 65 6C 6C 6F AD",
+      "expect_debug": "hello"
+    }
+  ]
+}

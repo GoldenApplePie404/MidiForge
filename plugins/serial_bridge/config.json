@@ -1,0 +1,10 @@
+{
+  "port": "COM15",
+  "baud": 115200,
+  "channel": null,
+  "to_midi": false,
+  "to_serial": true,
+  "protocol": "mfsp",
+  "map_in": [],
+  "map_out": []
+}
